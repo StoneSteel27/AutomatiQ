@@ -44,6 +44,20 @@ RECORDER_AI_MODEL = "gemini/gemini-3.1-flash-lite"
 # Use with --model openai/<model-name> (the openai/ prefix is required by litellm).
 API_BASE = None
 
+# ── Recorder proxy ───────────────────────────────────────────────────────────
+# Route the recording browser through an HTTP/SOCKS proxy.
+#   RECORDER_PROXY_SERVER   — static proxy URL, e.g. "http://user:pass@host:3128"
+#                             or "socks5://host:1080".
+#   RECORDER_PROXY_PROVIDER — optional "module:callable" that returns a proxy URL at
+#                             launch time (for rotating/dynamic proxies). When set it
+#                             takes precedence over RECORDER_PROXY_SERVER.
+# Proxying is only applied when RECORDER_PROXY_ENABLED is true.
+# Note: this only routes the recording browser's egress — LLM API calls,
+# blocklist downloads, and agent tool HTTP are unaffected.
+RECORDER_PROXY_ENABLED = False
+RECORDER_PROXY_SERVER = None
+RECORDER_PROXY_PROVIDER = None
+
 # ── Recording tunables ───────────────────────────────────────────────────────
 FPS = 3
 SEGMENT_PAD_SECONDS = 2
@@ -120,6 +134,36 @@ speed   = 1.0
 # Root directory for per-project output (workspace, blocklist).
 # Relative paths are resolved from the directory where you run `automatiq`.
 # dir = "output"
+
+[recorder_proxy]
+# Route the recording browser through an HTTP/SOCKS proxy.
+# This only affects the recording browser's egress — LLM API calls,
+# blocklist downloads, and agent tool HTTP are not proxied.
+enabled  = false
+
+# Static proxy URL. Examples:
+#   server = "http://127.0.0.1:3128"
+#   server = "http://user:pass@host:3128"
+#   server = "socks5://127.0.0.1:1080"
+# server = ""
+
+# Optional dynamic provider "module:callable" returning a proxy URL at launch
+# (for rotating proxies). Takes precedence over `server` when set.
+#
+# The callable takes no required arguments and returns a proxy URL string,
+# e.g. "http://host:3128". A minimal rotating provider looks like:
+#
+#     # myproxies.py
+#     import requests
+#     def rotate() -> str:
+#         requests.get("http://127.0.0.1:8000/rotate", timeout=30)
+#         return "http://127.0.0.1:3128"
+#
+# Tip: NodeMaven (https://go.nodemaven.com/automatiqagentmd) is the project's
+# preferred proxy partner — promo codes AUTOMATIQ35 (35% off Mobile/Residential)
+# and AUTOMATIQ40 (40% off ISP/Static) are available for AutomatiQ users.
+#
+# provider = "myproxies:rotate"
 """
 
 
@@ -133,6 +177,7 @@ def _load_config_toml():
     Silently skips if the file is missing or unparseable.
     """
     global AGENT_MODEL, RECORDER_AI_MODEL, API_BASE
+    global RECORDER_PROXY_ENABLED, RECORDER_PROXY_SERVER, RECORDER_PROXY_PROVIDER
     global MAX_AGENT_STEPS, SANDBOX_TIMEOUT_SECONDS
     global FPS, SEGMENT_PAD_SECONDS, MERGE_GAP_THRESHOLD_SECONDS, MAX_FRAMES_PER_PROMPT
     global BANNER_ENABLED, BANNER_SPEED
@@ -160,6 +205,15 @@ def _load_config_toml():
         RECORDER_AI_MODEL = str(models["recorder"])
     if "base_url" in models:
         API_BASE = str(models["base_url"])
+
+    # [recorder_proxy]
+    proxy = data.get("recorder_proxy", {})
+    if "enabled" in proxy:
+        RECORDER_PROXY_ENABLED = bool(proxy["enabled"])
+    if "server" in proxy:
+        RECORDER_PROXY_SERVER = str(proxy["server"]) or None
+    if "provider" in proxy:
+        RECORDER_PROXY_PROVIDER = str(proxy["provider"]) or None
 
     # [agent]
     agent = data.get("agent", {})

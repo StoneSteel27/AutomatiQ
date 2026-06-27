@@ -253,6 +253,8 @@ def cmd_record(args):
             cancel_token=cancel_token,
             stop_token=stop_token,
             skip_callback=get_cli_skip_callback(),
+            proxy=getattr(args, "proxy", None),
+            no_proxy=getattr(args, "no_proxy", False),
         )
     except KeyboardInterrupt:
         from .cli.console import warn
@@ -354,6 +356,8 @@ def cmd_run(args):
             cancel_token=cancel_token,
             stop_token=stop_token,
             skip_callback=get_cli_skip_callback(),
+            proxy=getattr(args, "proxy", None),
+            no_proxy=getattr(args, "no_proxy", False),
         )
     except KeyboardInterrupt:
         from .cli.console import warn
@@ -459,6 +463,7 @@ def _print_rich_help():
     t3.add_row("  models", "LLM model strings and custom API endpoints")
     t3.add_row("  agent", "Max iterations and sandbox timeouts")
     t3.add_row("  recording", "Capture FPS, clip padding, and merge thresholds")
+    t3.add_row("  recorder_proxy", "Recording browser proxy (HTTP/SOCKS) and dynamic providers")
     t3.add_row("  banner", "Startup animation toggle and speed")
     t3.add_row("  output", "Root directory for all generated output")
     console.print(t3)
@@ -475,6 +480,8 @@ def _print_rich_help():
     t4.add_row("--max-steps N", f"Maximum agent loop iterations (default: {config.MAX_AGENT_STEPS})")
     t4.add_row("--sandbox-timeout SEC", f"Seconds per IPython cell (default: {config.SANDBOX_TIMEOUT_SECONDS})")
     t4.add_row("--output-dir PATH", "Root directory for all output (default: ./output)")
+    t4.add_row("--proxy URL", "Route the recording browser through a proxy (record/run only)")
+    t4.add_row("--no-proxy", "Force a direct connection, overriding config (record/run only)")
     t4.add_row("--no-banner", "Skip the startup animation")
     t4.add_row("--verbose", "Show detailed diagnostic output")
     t4.add_row("-V, --version", "Show version")
@@ -576,10 +583,20 @@ def main():
         p.add_argument("-h", "--help", action="store_true", default=False, dest="help_flag")
         p.add_argument("-V", "--version", action="store_true", default=False)
 
+    def _add_proxy_flags(p):
+        p.add_argument(
+            "--proxy",
+            metavar="URL",
+            default=None,
+            help="Route the browser through a proxy, e.g. http://host:3128 or socks5://host:1080",
+        )
+        p.add_argument("--no-proxy", action="store_true", default=False, help="Force a direct connection")
+
     p_record = subparsers.add_parser("record", add_help=False)
     p_record.add_argument("url", nargs="?", default="about:blank")
     p_record.add_argument("--name", type=str, default=None, help="Name of the session folder")
     _add_common_flags(p_record, include_recorder_model=True)
+    _add_proxy_flags(p_record)
     p_record.set_defaults(func=cmd_record)
 
     p_agent = subparsers.add_parser("agent", add_help=False)
@@ -591,6 +608,7 @@ def main():
     p_run.add_argument("url", nargs="?", default="about:blank")
     p_run.add_argument("--name", type=str, default=None, help="Name of the session folder")
     _add_common_flags(p_run, include_recorder_model=True)
+    _add_proxy_flags(p_run)
     p_run.set_defaults(func=cmd_run)
 
     args = parser.parse_args()

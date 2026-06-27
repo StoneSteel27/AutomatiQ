@@ -116,6 +116,43 @@ automatiq run https://example.com \
 
 *For permanent configuration without CLI flags, see [Configuration](#configuration) below.*
 
+## Proxy
+
+Route the recording browser through an HTTP or SOCKS proxy — useful for testing geo-restricted content, avoiding IP bans, or recording through rotating residential proxies.
+
+```bash
+# One-off: pass a proxy URL for this recording
+automatiq record --proxy socks5://127.0.0.1:1080 https://example.com
+
+# One-off: force a direct connection (overrides config)
+automatiq run --no-proxy https://example.com
+```
+
+For permanent configuration, edit `~/.automatiq/config.toml`:
+
+```toml
+[recorder_proxy]
+enabled = true
+server  = "http://user:pass@host:3128"   # or socks5://host:1080
+# provider = "myproxies:rotate"          # dynamic "module:callable" for rotating proxies
+```
+
+> [!Tip]
+> Looking for a reliable proxy provider? Our sponsor **[NodeMaven](https://go.nodemaven.com/automatiq)** offers 99.9% uptime residential & ISP proxies — use promo code `AUTOMATIQ35` (35% off Mobile/Residential) or `AUTOMATIQ40` (40% off ISP/Static).
+
+**Dynamic provider:** The `provider` field is a `"module:callable"` string. At launch, AutomatiQ imports the module and calls the function (no arguments) to get a proxy URL. This lets you plug in rotating proxy services without hardcoding a single IP. The module just needs to be importable (place it in your working directory or on `PYTHONPATH`).
+
+```python
+# myproxies.py — a minimal rotating provider
+import requests
+
+def rotate() -> str:
+    requests.get("http://127.0.0.1:8000/rotate", timeout=30)
+    return "http://127.0.0.1:3128"
+```
+
+Precedence: `--no-proxy` > `--proxy URL` > `provider` > `server`. If the provider fails or returns nothing, AutomatiQ falls back to `server`. This only routes the recording browser's egress — LLM API calls, blocklist downloads, and agent tool HTTP are unaffected.
+
 ## Reference
 
 ### Keyboard Shortcuts
@@ -142,6 +179,8 @@ automatiq run https://example.com \
 | `--max-steps N` | Maximum agent loop iterations (default: 100) |
 | `--sandbox-timeout SEC` | Seconds per IPython cell (default: 60) |
 | `--output-dir PATH` | Root directory for all output (default: ./output) |
+| `--proxy URL` | Route the recording browser through a proxy (`record` and `run` only) |
+| `--no-proxy` | Force a direct connection, overriding config (`record` and `run` only) |
 | `--no-banner` | Skip the startup animation |
 | `--verbose` | Show detailed diagnostic output |
 | `-V`, `--version` | Show version |
@@ -166,6 +205,11 @@ fps                   = 3
 segment_pad           = 2
 merge_gap_threshold   = 1.5
 max_frames_per_prompt = 8
+
+[recorder_proxy]
+# enabled  = false
+# server   = "http://user:pass@host:3128"
+# provider = "myproxies:rotate"   # dynamic "module:callable" for rotating proxies
 ```
 
 *Priority order: **CLI flag** > `~/.automatiq/config.toml` > built-in defaults.*

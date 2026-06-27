@@ -27,11 +27,20 @@ logger = logging.getLogger(__name__)
 class BrowserAgent(_TargetManager, _NetworkHandlers, _WebsocketHandlers):
     """Manages the headless/UI browser session, CDP event handlers, and data collection."""
 
-    def __init__(self, telemetry_js_path=None, visuals_js_path=None, blocklist: BlocklistDB | None = None):
+    def __init__(
+        self,
+        telemetry_js_path=None,
+        visuals_js_path=None,
+        blocklist: BlocklistDB | None = None,
+        proxy: str | None = None,
+    ):
         _js_dir = os.path.join(os.path.dirname(__file__), "js")
         self.telemetry_js_path = telemetry_js_path or os.path.join(_js_dir, "telemetry.js")
         self.visuals_js_path = visuals_js_path or os.path.join(_js_dir, "visuals.js")
         self.blocklist = blocklist
+        # Proxy URL (e.g. "http://host:3128", "socks5://host:1080") passed to the
+        # browser via --proxy-server. None means a direct connection.
+        self.proxy = proxy
         self._profile_dir = tempfile.TemporaryDirectory(prefix="automatiq_chrome_")
 
         # New Disk-Streaming Setup
@@ -105,9 +114,17 @@ class BrowserAgent(_TargetManager, _NetworkHandlers, _WebsocketHandlers):
 
         try:
             events.log_info.send("recorder", text="Starting Zendriver Browser...")
+            browser_args = [
+                "--incognito",
+                "--disable-popup-blocking",
+                f"--user-data-dir={self._profile_dir.name}",
+            ]
+            if self.proxy:
+                browser_args.append(f"--proxy-server={self.proxy}")
+                events.log_info.send("recorder", text=f"Routing browser through proxy: {self.proxy}")
             self.browser = await zd.start(
                 headless=False,
-                browser_args=["--incognito", "--disable-popup-blocking", f"--user-data-dir={self._profile_dir.name}"],
+                browser_args=browser_args,
             )
             self.recording_start = datetime.now(UTC)
 
