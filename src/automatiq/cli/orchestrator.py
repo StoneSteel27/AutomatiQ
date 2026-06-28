@@ -34,7 +34,8 @@ _first_prompt = True
 # Streaming state
 _thought_buf: list[str] = []
 _text_buf: list[str] = []
-_session_start_time = 0.0
+_total_generation_time = 0.0
+_generation_start = 0.0
 _session_tokens = 0
 
 
@@ -97,8 +98,11 @@ def _build_stream_group():
     content_children = [p for p in [thought_panel] if p is not None] + text_parts
     content_area = Group(*content_children) if content_children else Text("")
 
-    # Status line
-    elapsed = int(time.monotonic() - _session_start_time) if _session_start_time else 0
+    # Status line — only counts time while the model is generating
+    if _generation_start:
+        elapsed = int(_total_generation_time + (time.monotonic() - _generation_start))
+    else:
+        elapsed = int(_total_generation_time)
     status = Text(
         f"elapsed: {elapsed}s | session: {_session_tokens:,} tokens",
         style="dim",
@@ -146,7 +150,7 @@ def handle_agent_thought_chunk(sender, text, **kwargs):
     global _thought_buf
     _thought_buf.append(text)
     if _active_live is not None:
-        _active_live.update(_build_stream_group())
+        _active_live.refresh()
 
 
 @events.agent_text_chunk.connect
@@ -154,13 +158,16 @@ def handle_agent_text_chunk(sender, text, **kwargs):
     global _text_buf
     _text_buf.append(text)
     if _active_live is not None:
-        _active_live.update(_build_stream_group())
+        _active_live.refresh()
 
 
 @events.agent_stream_end.connect
 def handle_agent_stream_end(sender, usage=None, **kwargs):
     """Stream completed normally — finalize with clean Markdown and stop Live."""
-    global _active_live, _session_tokens
+    global _active_live, _session_tokens, _total_generation_time, _generation_start
+    if _generation_start:
+        _total_generation_time += time.monotonic() - _generation_start
+        _generation_start = 0.0
     if usage is not None:
         _session_tokens += getattr(usage, "completion_tokens", 0) or 0
     if _active_live is not None:
@@ -203,18 +210,19 @@ def handle_code_exec_end(sender, **kwargs):
 
 @events.llm_request_start.connect
 def handle_llm_request_start(sender, **kwargs):
-    global _active_live, _thought_buf, _text_buf
+    global _active_live, _thought_buf, _text_buf, _generation_start
     # Stop any previous Live (retry after error)
     if _active_live is not None:
         _active_live.update(_build_final_group())
         _stop_live()
     _thought_buf = []
     _text_buf = []
+    _generation_start = time.monotonic()
     if _active_live is None:
         from .console import console
 
         _active_live = Live(
-            _build_stream_group(),
+            get_renderable=_build_stream_group,
             console=console,
             refresh_per_second=10,
             transient=False,
@@ -225,6 +233,10 @@ def handle_llm_request_start(sender, **kwargs):
 @events.llm_request_end.connect
 def handle_llm_request_end(sender, **kwargs):
     """Safety net — stop Live if the stream didn't complete normally."""
+    global _total_generation_time, _generation_start
+    if _generation_start:
+        _total_generation_time += time.monotonic() - _generation_start
+        _generation_start = 0.0
     if _active_live is not None:
         _active_live.update(_build_final_group())
         _stop_live()
@@ -234,13 +246,11 @@ def handle_llm_request_end(sender, **kwargs):
 
 
 def run_agent_cli(cancel_token: CancelToken = None, stop_token: StopToken = None, target: str | None = None):
-    global _session_start_time
     if cancel_token is None:
         cancel_token = CancelToken()
     if stop_token is None:
         stop_token = StopToken()
 
-    _session_start_time = time.monotonic()
     input_queue = queue.Queue()
 
     @events.wait_start.connect
