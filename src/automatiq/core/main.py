@@ -6,10 +6,8 @@ import logging
 import os
 import queue
 import sys
-import threading
 import time
 from pathlib import Path
-from types import SimpleNamespace
 
 import litellm
 from litellm.exceptions import (
@@ -27,6 +25,7 @@ from .cancel_standard import (
     CancelToken,
     StopRequestedException,
     StopToken,
+    run_cancellable,
 )
 from .guardrails import check_duplicate_thought, check_final_script_bounce, check_repeated_execution
 from .history import compress_history, export_session_logs
@@ -57,36 +56,6 @@ def handle_preload_start(sender, **kwargs):
             timeout_seconds=config.SANDBOX_TIMEOUT_SECONDS,
             bin_path=str(config.BIN_DIR),
         )
-    events.preload_end.send("core")
-
-
-def run_cancellable(token: CancelToken, fn, *args, stop_token: StopToken = None, **kwargs):
-    """Run *fn* in a thread, returning early if *token* is cancelled or *stop_token* is stopped."""
-    result_box = [None]
-    error_box = [None]
-    done = threading.Event()
-
-    def worker():
-        try:
-            result_box[0] = fn(*args, **kwargs)
-        except Exception as exc:
-            error_box[0] = exc
-        finally:
-            done.set()
-
-    token.reset()
-    t = threading.Thread(target=worker, daemon=True)
-    t.start()
-    while not done.is_set():
-        if token.is_cancelled():
-            token.reset()
-            raise CancelRequestedException("Cancelled via token")
-        if stop_token and stop_token.is_stopped():
-            raise StopRequestedException("Aborted via stop token")
-        done.wait(timeout=0.15)
-    if error_box[0] is not None:
-        raise error_box[0]
-    return result_box[0]
 
 
 # -----------------
@@ -130,7 +99,6 @@ def run_agent(
     stop_token: StopToken = None,
     target: str | None = None,
 ):
-    events.agent_start.send("core")
     """Interactive agent loop. Reads from the workspace produced by the recorder."""
     if cancel_token is None:
         cancel_token = CancelToken()
@@ -224,9 +192,9 @@ def run_agent(
 
             if not needs_user_input:
                 if consecutive_autonomous_turns >= config.MAX_AGENT_STEPS:
-                    events.agent_text.send(
+                    events.log_warn.send(
                         "core",
-                        text=f"⚠️ Paused: Agent hit {config.MAX_AGENT_STEPS} consecutive turns without completing task.",
+                        text=f"Paused: Agent hit {config.MAX_AGENT_STEPS} consecutive turns without completing task.",
                     )
                     messages.append(
                         {
@@ -246,7 +214,6 @@ def run_agent(
                 events.prompt_request_start.send("core")
                 ip = input_queue.get()
                 consecutive_autonomous_turns = 0
-                events.prompt_request_end.send("core")
                 if ip.strip().lower() == "q":
                     events.log_info.send("core", text="User requested exit.")
                     break
@@ -322,16 +289,6 @@ def run_agent(
                     if tool_call_accumulator:
                         sorted_indices = sorted(tool_call_accumulator)
                         tool_calls = [
-                            SimpleNamespace(
-                                id=tool_call_accumulator[idx]["id"],
-                                function=SimpleNamespace(
-                                    name=tool_call_accumulator[idx]["name"],
-                                    arguments=tool_call_accumulator[idx]["arguments"],
-                                ),
-                            )
-                            for idx in sorted_indices
-                        ]
-                        assistant_msg["tool_calls"] = [
                             {
                                 "id": tool_call_accumulator[idx]["id"],
                                 "type": "function",
@@ -342,6 +299,7 @@ def run_agent(
                             }
                             for idx in sorted_indices
                         ]
+                        assistant_msg["tool_calls"] = tool_calls
                     else:
                         tool_calls = None
 
@@ -402,17 +360,13 @@ def run_agent(
 
             if not tool_calls:
                 messages.append(assistant_msg)
-                if reasoning:
-                    events.agent_thought.send("core", text=reasoning)
-                if content:
-                    events.agent_text.send("core", text=content)
                 needs_user_input = True
                 continue
 
             tool_call = tool_calls[0]
-            tool_name = tool_call.function.name
+            tool_name = tool_call["function"]["name"]
             try:
-                tool_args = json.loads(tool_call.function.arguments)
+                tool_args = json.loads(tool_call["function"]["arguments"])
             except json.JSONDecodeError as exc:
                 tool_args = {}
                 validation_error = f"Invalid JSON arguments: {exc}"
@@ -430,7 +384,7 @@ def run_agent(
                     messages.append(
                         {
                             "role": "tool",
-                            "tool_call_id": tool_call.id,
+                            "tool_call_id": tool_call["id"],
                             "name": tool_name,
                             "content": f"SYSTEM: Validation failed repeatedly. Error: {validation_error}. Returning.",
                         }
@@ -442,7 +396,7 @@ def run_agent(
                     messages.append(
                         {
                             "role": "tool",
-                            "tool_call_id": tool_call.id,
+                            "tool_call_id": tool_call["id"],
                             "name": tool_name,
                             "content": f"SYSTEM: Tool Validation Error: {validation_error}. Please try again.",
                         }
@@ -460,7 +414,7 @@ def run_agent(
                 messages.append(
                     {
                         "role": "tool",
-                        "tool_call_id": tool_call.id,
+                        "tool_call_id": tool_call["id"],
                         "name": tool_name,
                         "content": duplicate_warning,
                     }
@@ -472,10 +426,6 @@ def run_agent(
 
             # Append the LLM's assistant message
             messages.append(assistant_msg)
-            if reasoning:
-                events.agent_thought.send("core", text=reasoning)
-            if content:
-                events.agent_text.send("core", text=content)
 
             # Process the specific tool
             if tool_name == "final_submit":
@@ -493,7 +443,7 @@ def run_agent(
                     messages.append(
                         {
                             "role": "tool",
-                            "tool_call_id": tool_call.id,
+                            "tool_call_id": tool_call["id"],
                             "name": tool_name,
                             "content": bounce_message,
                         }
@@ -505,7 +455,7 @@ def run_agent(
                 messages.append(
                     {
                         "role": "tool",
-                        "tool_call_id": tool_call.id,
+                        "tool_call_id": tool_call["id"],
                         "name": tool_name,
                         "content": "Final script delivered successfully to the user. Awaiting feedback.",
                     }
@@ -528,7 +478,7 @@ def run_agent(
                     messages.append(
                         {
                             "role": "tool",
-                            "tool_call_id": tool_call.id,
+                            "tool_call_id": tool_call["id"],
                             "name": tool_name,
                             "content": repeat_warning,
                         }
@@ -548,7 +498,7 @@ def run_agent(
                     messages.append(
                         {
                             "role": "tool",
-                            "tool_call_id": tool_call.id,
+                            "tool_call_id": tool_call["id"],
                             "name": tool_name,
                             "content": "SYSTEM: Execution cancelled by user.",
                         }
@@ -573,7 +523,12 @@ def run_agent(
                 tool_response_content = f"<terminal_output>\n{scr}\n</terminal_output>"
 
                 messages.append(
-                    {"role": "tool", "tool_call_id": tool_call.id, "name": tool_name, "content": tool_response_content}
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call["id"],
+                        "name": tool_name,
+                        "content": tool_response_content,
+                    }
                 )
 
                 awaiting_tool_complete = False
@@ -589,7 +544,7 @@ def run_agent(
                 messages.append(
                     {
                         "role": "tool",
-                        "tool_call_id": tool_call.id,
+                        "tool_call_id": tool_call["id"],
                         "name": tool_name,
                         "content": "Mode switched successfully.",
                     }

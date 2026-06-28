@@ -58,12 +58,14 @@ class CancelRequestedException(Exception):
     pass
 
 
-def run_cancellable(token: CancelToken, func, *args, **kwargs):
-    """Run a function in a background thread, raising CancelRequestedException if token is cancelled.
+def run_cancellable(token: CancelToken, func, *args, stop_token: StopToken = None, **kwargs):
+    """Run a function in a background thread, raising if cancelled or stopped.
 
-    This replaces the old `run_interruptible` block that used OS-level Esc-key polling.
+    Raises :class:`CancelRequestedException` if *token* is cancelled (and resets it
+    before raising), or :class:`StopRequestedException` if *stop_token* is stopped.
     """
     if token and token.is_cancelled():
+        token.reset()
         raise CancelRequestedException()
 
     result = []
@@ -81,9 +83,12 @@ def run_cancellable(token: CancelToken, func, *args, **kwargs):
     thread = threading.Thread(target=_worker, daemon=True)
     thread.start()
 
-    while not done.wait(timeout=0.1):
+    while not done.wait(timeout=0.15):
         if token and token.is_cancelled():
-            raise CancelRequestedException()
+            token.reset()
+            raise CancelRequestedException("Cancelled via token")
+        if stop_token and stop_token.is_stopped():
+            raise StopRequestedException("Aborted via stop token")
 
     if error:
         raise error[0]

@@ -181,11 +181,6 @@ def error(msg: str) -> None:
     _log(logging.ERROR, msg)
 
 
-def success(msg: str) -> None:
-    console.print(f"[success]\\[SUCCESS][/success] {escape(msg)}")
-    _log(logging.INFO, msg)
-
-
 def action(msg: str) -> None:
     console.print(f"[action]\\[ACTION][/action] {escape(msg)}")
     _log(logging.INFO, f"[ACTION] {msg}")
@@ -237,26 +232,6 @@ def rule(title: str = "", style: str = "dim") -> None:
     console.print(Rule(title=title, style=style))
 
 
-def detail(msg: str) -> None:
-    _log(logging.DEBUG, msg)
-    from ..core import config
-
-    if config.VERBOSE:
-        console.print(f"  [dim]{escape(msg)}[/dim]")
-
-
-def print_exception() -> None:
-    """Single line error to terminal + plain traceback to log file."""
-    exc_type, exc_val, _ = sys.exc_info()
-    if exc_val:
-        console.print(f"[error]\\[ERROR][/error] {escape(str(exc_val).splitlines()[0])}")
-    else:
-        console.print("[error]\\[ERROR][/error] Unknown Exception")
-
-    if _file_logger:
-        _file_logger.error(traceback.format_exc())
-
-
 def log_exception() -> None:
     """Plain traceback to the log file only — nothing on terminal."""
     if _file_logger:
@@ -268,13 +243,7 @@ def spinner(message: str = "Working..."):
     return console.status(f"[dim]{message}[/dim]", spinner="aesthetic", spinner_style="cyan")
 
 
-_original_termios = None
-_stdin_fd = None
 _active_listener = None
-
-
-def restore_terminal() -> None:
-    pass
 
 
 class CLIListener:
@@ -308,7 +277,6 @@ class CLIListener:
         self._paused_event.clear()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=0.5)
-        restore_terminal()
 
     def is_set(self) -> bool:
         return self._active_event.is_set()

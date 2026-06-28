@@ -64,31 +64,6 @@ def _is_model_error(exc: Exception) -> bool:
     return any(n in msg for n in needles)
 
 
-def call_llm_blocking(msgs: list[dict], tools: list[dict]):
-    """Blocking LLM call to litellm."""
-    kwargs = dict(
-        model=config.AGENT_MODEL,
-        messages=msgs,
-        tools=tools,
-        tool_choice="auto",
-        temperature=0.3,
-    )
-    if config.API_BASE:
-        kwargs["api_base"] = config.API_BASE
-
-    # Enable extended thinking/reasoning for models that support it
-    if litellm.supports_reasoning(model=config.AGENT_MODEL):
-        kwargs["reasoning_effort"] = "high"
-
-    try:
-        return litellm.completion(**kwargs)
-    except Exception as exc:
-        if _is_model_error(exc):
-            msg = extract_message(exc)
-            raise ValueError(_build_model_help(config.AGENT_MODEL, msg)) from exc
-        raise
-
-
 def call_llm_streaming(msgs: list[dict], tools: list[dict]):
     """Streaming LLM call to litellm.
 

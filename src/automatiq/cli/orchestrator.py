@@ -1,4 +1,3 @@
-import logging
 import queue
 import threading
 import time
@@ -16,6 +15,7 @@ from ..core.main import run_agent
 from .console import (
     agent_markdown,
     code_block,
+    console,
     countdown,
     error,
     info,
@@ -24,8 +24,6 @@ from .console import (
     prompt,
     think,
 )
-
-logger = logging.getLogger(__name__)
 
 # Global state
 _active_live = None
@@ -43,7 +41,8 @@ _total_generation_time = 0.0
 _generation_start = 0.0
 _session_tokens = 0
 
-# Phase: "streaming" | "tool_exec" (Live is stopped when neither is active)
+# Phase: "streaming" (Live shows streamed content) | "tool_exec" (Live shows the run spinner).
+# Live is stopped explicitly between phases.
 _phase = "streaming"
 
 
@@ -133,8 +132,6 @@ def _start_live():
     """Start the persistent Live region if not already running."""
     global _active_live
     if _active_live is None:
-        from .console import console
-
         _active_live = Live(
             get_renderable=_get_renderable,
             console=console,
@@ -179,16 +176,12 @@ def _flush_stream_to_console():
 def handle_agent_thought_chunk(sender, text, **kwargs):
     global _thought_buf
     _thought_buf.append(text)
-    if _active_live is not None:
-        _active_live.refresh()
 
 
 @events.agent_text_chunk.connect
 def handle_agent_text_chunk(sender, text, **kwargs):
     global _text_buf
     _text_buf.append(text)
-    if _active_live is not None:
-        _active_live.refresh()
 
 
 @events.agent_stream_end.connect
@@ -206,8 +199,6 @@ def handle_agent_stream_end(sender, usage=None, **kwargs):
 
 @events.tool_message.connect
 def handle_tool_message(sender, text, **kwargs):
-    from .console import console
-
     console.print(text)
 
 
@@ -248,13 +239,14 @@ def handle_llm_request_start(sender, **kwargs):
 
 @events.llm_request_end.connect
 def handle_llm_request_end(sender, **kwargs):
-    """Safety net — if stream didn't complete normally, stop Live then flush."""
+    """Safety net — if stream didn't complete normally (agent_stream_end didn't fire), stop Live and flush."""
     global _total_generation_time, _generation_start
     if _generation_start:
         _total_generation_time += time.monotonic() - _generation_start
         _generation_start = 0.0
-    _stop_live()
-    _flush_stream_to_console()
+    if _active_live is not None:
+        _stop_live()
+        _flush_stream_to_console()
 
 
 # ── CLI entry point ─────────────────────────────────────────────────────────
