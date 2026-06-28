@@ -7,7 +7,6 @@ def test_event_definitions():
     """Verify that expected Blinker signals exist and are properly instantiated."""
     expected_signals = [
         "agent_start",
-        "step_start",
         "agent_thought_chunk",
         "agent_text_chunk",
         "agent_stream_end",

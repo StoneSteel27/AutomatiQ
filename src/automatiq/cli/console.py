@@ -233,10 +233,6 @@ def output_panel(text: str) -> None:
     console.print(Panel(escape(text), title="[output]OUTPUT[/output]", border_style="dim", padding=(0, 1)))
 
 
-def step_info(step: int, prompt_tokens: int) -> None:
-    console.print(f"[dim]Step {step} | Prompt tokens: {prompt_tokens}[/dim]")
-
-
 def rule(title: str = "", style: str = "dim") -> None:
     console.print(Rule(title=title, style=style))
 

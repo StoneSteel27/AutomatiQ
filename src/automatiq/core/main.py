@@ -193,7 +193,6 @@ def run_agent(
     BASE_BACKOFF = 10
 
     consecutive_autonomous_turns = 0
-    total_steps = 0
 
     try:
         while True:
@@ -306,10 +305,10 @@ def run_agent(
                                         tool_call_accumulator[idx]["arguments"] += tc["arguments"]
                             if chunk_usage:
                                 usage = chunk_usage
+
+                        events.agent_stream_end.send("core", usage=usage)
                     finally:
                         events.llm_request_end.send("core")
-
-                    events.agent_stream_end.send("core", usage=usage)
 
                     reasoning = "".join(thought_buf) or None
                     content = "".join(text_buf)
@@ -451,9 +450,6 @@ def run_agent(
                 continue
 
             consecutive_validation_failures = 0
-
-            total_steps += 1
-            events.step_start.send("core", step=total_steps, prompt_tokens=usage.prompt_tokens if usage else 0)
 
             # Deduplicate logic based on description
             current_description = tool_args.get("description", "").strip() if tool_name == "execute_ipython" else ""
