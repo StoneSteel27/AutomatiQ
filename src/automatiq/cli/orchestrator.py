@@ -31,6 +31,11 @@ logger = logging.getLogger(__name__)
 _active_live = None
 _first_prompt = True
 
+# Persistent spinners — reused across refresh ticks so they actually animate.
+# A fresh Spinner() each tick always shows frame 0 because start_time resets.
+_think_spinner = Spinner("aesthetic", text="Thinking... (Press Esc to Stop)", style="cyan")
+_run_spinner = Spinner("aesthetic", text="Running... (Press Esc to Stop)", style="cyan")
+
 # Streaming state
 _thought_buf: list[str] = []
 _text_buf: list[str] = []
@@ -110,9 +115,7 @@ def _build_stream_group():
         style="dim",
     )
 
-    spin = Spinner("aesthetic", text="Thinking... (Press Esc to Stop)", style="cyan")
-
-    return Group(content_area, spin, status)
+    return Group(content_area, _think_spinner, status)
 
 
 def _get_renderable():
@@ -123,7 +126,7 @@ def _get_renderable():
     """
     if _phase == "streaming":
         return _build_stream_group()
-    return Spinner("aesthetic", text="Running... (Press Esc to Stop)", style="cyan")
+    return _run_spinner
 
 
 def _start_live():
@@ -136,7 +139,9 @@ def _start_live():
             get_renderable=_get_renderable,
             console=console,
             refresh_per_second=10,
-            transient=False,
+            transient=True,
+            redirect_stdout=False,
+            redirect_stderr=False,
         )
         _active_live.__enter__()
 
@@ -152,9 +157,9 @@ def _stop_live():
 def _flush_stream_to_console():
     """Print buffered thought/text as permanent output via console.print().
 
-    Called when a stream ends (normally or via safety net).  The content
-    is inserted above the active Live region by rich's print-during-Live
-    mechanism, making it permanent in the scrollback.
+    Called after the Live has been stopped (transient=True clears the
+    streaming display), so this content appears cleanly in the scrollback
+    with no cursor repositioning or flicker.
     """
     global _thought_buf, _text_buf
     thought_full = "".join(_thought_buf)
@@ -188,15 +193,15 @@ def handle_agent_text_chunk(sender, text, **kwargs):
 
 @events.agent_stream_end.connect
 def handle_agent_stream_end(sender, usage=None, **kwargs):
-    """Stream completed — flush final content to console, stop Live."""
+    """Stream completed — stop Live (clears display), then print permanent content."""
     global _session_tokens, _total_generation_time, _generation_start
     if _generation_start:
         _total_generation_time += time.monotonic() - _generation_start
         _generation_start = 0.0
     if usage is not None:
         _session_tokens += getattr(usage, "completion_tokens", 0) or 0
-    _flush_stream_to_console()
     _stop_live()
+    _flush_stream_to_console()
 
 
 @events.tool_message.connect
@@ -214,6 +219,7 @@ def handle_mode_switch(sender, mode, **kwargs):
 @events.code_exec_start.connect
 def handle_code_exec_start(sender, script=None, **kwargs):
     global _phase
+    _stop_live()
     if script is not None:
         code_block(script)
     _phase = "tool_exec"
@@ -242,13 +248,13 @@ def handle_llm_request_start(sender, **kwargs):
 
 @events.llm_request_end.connect
 def handle_llm_request_end(sender, **kwargs):
-    """Safety net — if stream didn't complete normally, flush and stop Live."""
+    """Safety net — if stream didn't complete normally, stop Live then flush."""
     global _total_generation_time, _generation_start
     if _generation_start:
         _total_generation_time += time.monotonic() - _generation_start
         _generation_start = 0.0
-    _flush_stream_to_console()
     _stop_live()
+    _flush_stream_to_console()
 
 
 # ── CLI entry point ─────────────────────────────────────────────────────────
