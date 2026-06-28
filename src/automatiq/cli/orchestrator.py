@@ -38,8 +38,8 @@ _total_generation_time = 0.0
 _generation_start = 0.0
 _session_tokens = 0
 
-# Phase: "streaming" | "tool_exec" | "idle"
-_phase = "idle"
+# Phase: "streaming" | "tool_exec" (Live is stopped when neither is active)
+_phase = "streaming"
 
 
 # ── Streaming render helpers ────────────────────────────────────────────────
@@ -119,13 +119,11 @@ def _get_renderable():
     """Return the current Live renderable based on phase.
 
     Called by Live's auto-refresh thread (10x/sec) under the Live's lock.
+    The Live is only active during 'streaming' and 'tool_exec' phases.
     """
     if _phase == "streaming":
         return _build_stream_group()
-    elif _phase == "tool_exec":
-        return Spinner("aesthetic", text="Running... (Press Esc to Stop)", style="cyan")
-    else:
-        return Text("")
+    return Spinner("aesthetic", text="Running... (Press Esc to Stop)", style="cyan")
 
 
 def _start_live():
@@ -190,17 +188,15 @@ def handle_agent_text_chunk(sender, text, **kwargs):
 
 @events.agent_stream_end.connect
 def handle_agent_stream_end(sender, usage=None, **kwargs):
-    """Stream completed — flush final content to console, switch to idle."""
-    global _phase, _session_tokens, _total_generation_time, _generation_start
+    """Stream completed — flush final content to console, stop Live."""
+    global _session_tokens, _total_generation_time, _generation_start
     if _generation_start:
         _total_generation_time += time.monotonic() - _generation_start
         _generation_start = 0.0
     if usage is not None:
         _session_tokens += getattr(usage, "completion_tokens", 0) or 0
     _flush_stream_to_console()
-    _phase = "idle"
-    if _active_live is not None:
-        _active_live.refresh()
+    _stop_live()
 
 
 @events.tool_message.connect
@@ -221,8 +217,7 @@ def handle_code_exec_start(sender, script=None, **kwargs):
     if script is not None:
         code_block(script)
     _phase = "tool_exec"
-    if _active_live is not None:
-        _active_live.refresh()
+    _start_live()
 
 
 @events.code_exec_output.connect
@@ -232,10 +227,7 @@ def handle_code_exec_output(sender, output, **kwargs):
 
 @events.code_exec_end.connect
 def handle_code_exec_end(sender, **kwargs):
-    global _phase
-    _phase = "idle"
-    if _active_live is not None:
-        _active_live.refresh()
+    _stop_live()
 
 
 @events.llm_request_start.connect
@@ -250,15 +242,13 @@ def handle_llm_request_start(sender, **kwargs):
 
 @events.llm_request_end.connect
 def handle_llm_request_end(sender, **kwargs):
-    """Safety net — if stream didn't complete normally, flush and go idle."""
-    global _phase, _total_generation_time, _generation_start
+    """Safety net — if stream didn't complete normally, flush and stop Live."""
+    global _total_generation_time, _generation_start
     if _generation_start:
         _total_generation_time += time.monotonic() - _generation_start
         _generation_start = 0.0
     _flush_stream_to_console()
-    _phase = "idle"
-    if _active_live is not None:
-        _active_live.refresh()
+    _stop_live()
 
 
 # ── CLI entry point ─────────────────────────────────────────────────────────
