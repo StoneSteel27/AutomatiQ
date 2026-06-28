@@ -14,6 +14,7 @@ from ..core import events
 from ..core.cancel_standard import CancelToken, StopToken
 from ..core.main import run_agent
 from .console import (
+    agent_markdown,
     code_block,
     countdown,
     error,
@@ -21,14 +22,13 @@ from .console import (
     log_exception,
     output_panel,
     prompt,
-    spinner,
+    think,
 )
 
 logger = logging.getLogger(__name__)
 
-# Global state for UI elements that span events
-_active_spinner = None  # code-exec spinner (console.status)
-_active_live = None  # LLM streaming Live region
+# Global state
+_active_live = None
 _first_prompt = True
 
 # Streaming state
@@ -37,6 +37,9 @@ _text_buf: list[str] = []
 _total_generation_time = 0.0
 _generation_start = 0.0
 _session_tokens = 0
+
+# Phase: "streaming" | "tool_exec" | "idle"
+_phase = "idle"
 
 
 # ── Streaming render helpers ────────────────────────────────────────────────
@@ -53,7 +56,6 @@ def _split_md_pending(buffer: str):
         return None, None
     idx = buffer.rfind("\n")
     if idx == -1:
-        # No newline yet — all pending
         return None, Text(buffer + "\u258d", style="dim")
     completed = buffer[: idx + 1]
     pending = buffer[idx + 1 :]
@@ -63,7 +65,7 @@ def _split_md_pending(buffer: str):
 
 
 def _build_stream_group():
-    """Build the live render group: content + spinner + status line."""
+    """Build the streaming render group: content + spinner + status line."""
     thought_full = "".join(_thought_buf)
     text_full = "".join(_text_buf)
 
@@ -113,25 +115,32 @@ def _build_stream_group():
     return Group(content_area, spin, status)
 
 
-def _build_final_group():
-    """Build the final render group: clean Markdown, no spinner/status."""
-    thought_full = "".join(_thought_buf)
-    text_full = "".join(_text_buf)
+def _get_renderable():
+    """Return the current Live renderable based on phase.
 
-    parts = []
-    if thought_full.strip():
-        parts.append(
-            Panel(
-                Markdown(thought_full),
-                title="[think]Thinking[/think]",
-                border_style="dim",
-                padding=(0, 1),
-            )
+    Called by Live's auto-refresh thread (10x/sec) under the Live's lock.
+    """
+    if _phase == "streaming":
+        return _build_stream_group()
+    elif _phase == "tool_exec":
+        return Spinner("aesthetic", text="Running... (Press Esc to Stop)", style="cyan")
+    else:
+        return Text("")
+
+
+def _start_live():
+    """Start the persistent Live region if not already running."""
+    global _active_live
+    if _active_live is None:
+        from .console import console
+
+        _active_live = Live(
+            get_renderable=_get_renderable,
+            console=console,
+            refresh_per_second=10,
+            transient=False,
         )
-    if text_full.strip():
-        parts.append(Markdown(text_full))
-
-    return Group(*parts) if parts else Text("")
+        _active_live.__enter__()
 
 
 def _stop_live():
@@ -140,6 +149,24 @@ def _stop_live():
     if _active_live is not None:
         _active_live.__exit__(None, None, None)
         _active_live = None
+
+
+def _flush_stream_to_console():
+    """Print buffered thought/text as permanent output via console.print().
+
+    Called when a stream ends (normally or via safety net).  The content
+    is inserted above the active Live region by rich's print-during-Live
+    mechanism, making it permanent in the scrollback.
+    """
+    global _thought_buf, _text_buf
+    thought_full = "".join(_thought_buf)
+    text_full = "".join(_text_buf)
+    if thought_full.strip():
+        think(thought_full)
+    if text_full.strip():
+        agent_markdown(text_full)
+    _thought_buf = []
+    _text_buf = []
 
 
 # ── Event handlers ──────────────────────────────────────────────────────────
@@ -163,21 +190,24 @@ def handle_agent_text_chunk(sender, text, **kwargs):
 
 @events.agent_stream_end.connect
 def handle_agent_stream_end(sender, usage=None, **kwargs):
-    """Stream completed normally — finalize with clean Markdown and stop Live."""
-    global _active_live, _session_tokens, _total_generation_time, _generation_start
+    """Stream completed — flush final content to console, switch to idle."""
+    global _phase, _session_tokens, _total_generation_time, _generation_start
     if _generation_start:
         _total_generation_time += time.monotonic() - _generation_start
         _generation_start = 0.0
     if usage is not None:
         _session_tokens += getattr(usage, "completion_tokens", 0) or 0
+    _flush_stream_to_console()
+    _phase = "idle"
     if _active_live is not None:
-        _active_live.update(_build_final_group())
-        _stop_live()
+        _active_live.refresh()
 
 
 @events.tool_message.connect
 def handle_tool_message(sender, text, **kwargs):
-    print(text)
+    from .console import console
+
+    console.print(text)
 
 
 @events.mode_switch.connect
@@ -187,12 +217,12 @@ def handle_mode_switch(sender, mode, **kwargs):
 
 @events.code_exec_start.connect
 def handle_code_exec_start(sender, script=None, **kwargs):
-    global _active_spinner
+    global _phase
     if script is not None:
         code_block(script)
-    if _active_spinner is None:
-        _active_spinner = spinner("Running...(Press Esc to Stop)")
-        _active_spinner.__enter__()
+    _phase = "tool_exec"
+    if _active_live is not None:
+        _active_live.refresh()
 
 
 @events.code_exec_output.connect
@@ -202,44 +232,33 @@ def handle_code_exec_output(sender, output, **kwargs):
 
 @events.code_exec_end.connect
 def handle_code_exec_end(sender, **kwargs):
-    global _active_spinner
-    if _active_spinner:
-        _active_spinner.__exit__(None, None, None)
-        _active_spinner = None
+    global _phase
+    _phase = "idle"
+    if _active_live is not None:
+        _active_live.refresh()
 
 
 @events.llm_request_start.connect
 def handle_llm_request_start(sender, **kwargs):
-    global _active_live, _thought_buf, _text_buf, _generation_start
-    # Stop any previous Live (retry after error)
-    if _active_live is not None:
-        _active_live.update(_build_final_group())
-        _stop_live()
+    global _thought_buf, _text_buf, _generation_start, _phase
     _thought_buf = []
     _text_buf = []
     _generation_start = time.monotonic()
-    if _active_live is None:
-        from .console import console
-
-        _active_live = Live(
-            get_renderable=_build_stream_group,
-            console=console,
-            refresh_per_second=10,
-            transient=False,
-        )
-        _active_live.__enter__()
+    _phase = "streaming"
+    _start_live()
 
 
 @events.llm_request_end.connect
 def handle_llm_request_end(sender, **kwargs):
-    """Safety net — stop Live if the stream didn't complete normally."""
-    global _total_generation_time, _generation_start
+    """Safety net — if stream didn't complete normally, flush and go idle."""
+    global _phase, _total_generation_time, _generation_start
     if _generation_start:
         _total_generation_time += time.monotonic() - _generation_start
         _generation_start = 0.0
+    _flush_stream_to_console()
+    _phase = "idle"
     if _active_live is not None:
-        _active_live.update(_build_final_group())
-        _stop_live()
+        _active_live.refresh()
 
 
 # ── CLI entry point ─────────────────────────────────────────────────────────
@@ -262,6 +281,8 @@ def run_agent_cli(cancel_token: CancelToken = None, stop_token: StopToken = None
                 raise StopRequestedException()
             return cancel_token.is_cancelled()
 
+        # Stop Live so countdown has terminal control
+        _stop_live()
         cancelled = countdown(seconds, message=reason, cancel_check=should_abort)
         if cancelled:
             cancel_token.reset()
@@ -274,6 +295,8 @@ def run_agent_cli(cancel_token: CancelToken = None, stop_token: StopToken = None
             info("Type in q to quit | Esc to cancel processing | Ctrl+Enter for new-line")
             _first_prompt = False
 
+        # Stop Live so prompt_toolkit has terminal control
+        _stop_live()
         try:
             ip = prompt()
         except (KeyboardInterrupt, EOFError):
@@ -316,9 +339,4 @@ def run_agent_cli(cancel_token: CancelToken = None, stop_token: StopToken = None
         stop_token.stop()
         done_event.wait(timeout=5.0)
     finally:
-        global _active_spinner, _active_live
-        if _active_spinner:
-            _active_spinner.__exit__(None, None, None)
-            _active_spinner = None
-        if _active_live is not None:
-            _stop_live()
+        _stop_live()
