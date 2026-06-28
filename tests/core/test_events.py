@@ -8,6 +8,9 @@ def test_event_definitions():
     expected_signals = [
         "agent_start",
         "step_start",
+        "agent_thought_chunk",
+        "agent_text_chunk",
+        "agent_stream_end",
         "log_info",
         "log_error",
         "code_exec_start",

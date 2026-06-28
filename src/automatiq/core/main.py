@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import litellm
 from litellm.exceptions import (
@@ -30,7 +31,7 @@ from .cancel_standard import (
 from .guardrails import check_duplicate_thought, check_final_script_bounce, check_repeated_execution
 from .history import compress_history, export_session_logs
 from .ipython_sandbox import AgentSandbox
-from .llm import call_llm_blocking, extract_message
+from .llm import call_llm_streaming, extract_message
 from .prompts import MODE_INJECTIONS, SYSTEM_PROMPT
 from .tools import AGENT_TOOLS, validate_tool_args
 
@@ -263,17 +264,88 @@ def run_agent(
             # Compress history to save tokens
             compiled_messages = compress_history(messages, cutoff_turn=20)
 
-            resp = None
+            assistant_msg = None
+            tool_calls = None
+            reasoning = None
+            content = ""
+            usage = None
             aborted = False
             for attempt in range(1, MAX_LLM_RETRIES + 1):
                 try:
                     events.llm_request_start.send("core")
                     try:
-                        resp = run_cancellable(
-                            cancel_token, call_llm_blocking, compiled_messages, AGENT_TOOLS, stop_token=stop_token
-                        )
+                        stream = call_llm_streaming(compiled_messages, AGENT_TOOLS)
+                        thought_buf: list[str] = []
+                        text_buf: list[str] = []
+                        tool_call_accumulator: dict[int, dict] = {}
+                        for chunk in stream:
+                            if cancel_token.is_cancelled():
+                                cancel_token.reset()
+                                raise CancelRequestedException("Cancelled via token during streaming")
+                            if stop_token and stop_token.is_stopped():
+                                raise StopRequestedException("Aborted via stop token during streaming")
+
+                            reasoning_delta, content_delta, tool_call_deltas, chunk_usage = chunk
+
+                            if reasoning_delta:
+                                thought_buf.append(reasoning_delta)
+                                events.agent_thought_chunk.send("core", text=reasoning_delta)
+                            if content_delta:
+                                text_buf.append(content_delta)
+                                events.agent_text_chunk.send("core", text=content_delta)
+                            if tool_call_deltas:
+                                for tc in tool_call_deltas:
+                                    idx = tc["index"]
+                                    if idx not in tool_call_accumulator:
+                                        tool_call_accumulator[idx] = {"id": None, "name": None, "arguments": ""}
+                                    if tc["id"]:
+                                        tool_call_accumulator[idx]["id"] = tc["id"]
+                                    if tc["name"]:
+                                        tool_call_accumulator[idx]["name"] = tc["name"]
+                                    if tc["arguments"]:
+                                        tool_call_accumulator[idx]["arguments"] += tc["arguments"]
+                            if chunk_usage:
+                                usage = chunk_usage
                     finally:
                         events.llm_request_end.send("core")
+
+                    events.agent_stream_end.send("core", usage=usage)
+
+                    reasoning = "".join(thought_buf) or None
+                    content = "".join(text_buf)
+
+                    assistant_msg = {"role": "assistant"}
+                    if content:
+                        assistant_msg["content"] = content
+                    if reasoning:
+                        assistant_msg["reasoning_content"] = reasoning
+
+                    if tool_call_accumulator:
+                        sorted_indices = sorted(tool_call_accumulator)
+                        tool_calls = [
+                            SimpleNamespace(
+                                id=tool_call_accumulator[idx]["id"],
+                                function=SimpleNamespace(
+                                    name=tool_call_accumulator[idx]["name"],
+                                    arguments=tool_call_accumulator[idx]["arguments"],
+                                ),
+                            )
+                            for idx in sorted_indices
+                        ]
+                        assistant_msg["tool_calls"] = [
+                            {
+                                "id": tool_call_accumulator[idx]["id"],
+                                "type": "function",
+                                "function": {
+                                    "name": tool_call_accumulator[idx]["name"],
+                                    "arguments": tool_call_accumulator[idx]["arguments"],
+                                },
+                            }
+                            for idx in sorted_indices
+                        ]
+                    else:
+                        tool_calls = None
+
                     break
                 except CancelRequestedException:
                     events.log_info.send("core", text="Cancelled by token. Returning to prompt.")
@@ -323,21 +395,14 @@ def run_agent(
                         aborted = True
                         break
 
-            if aborted or resp is None:
+            if aborted or assistant_msg is None:
                 needs_user_input = True
                 awaiting_tool_complete = False
                 awaiting_mode_switch = False
                 continue
 
-            msg_obj = resp.choices[0].message
-            tool_calls = msg_obj.tool_calls
-
-            # Extract reasoning and content natively
-            reasoning = getattr(msg_obj, "reasoning_content", None)
-            content = msg_obj.content or ""
-
             if not tool_calls:
-                messages.append(msg_obj.model_dump(exclude_none=True))
+                messages.append(assistant_msg)
                 if reasoning:
                     events.agent_thought.send("core", text=reasoning)
                 if content:
@@ -357,7 +422,7 @@ def run_agent(
 
             if validation_error:
                 consecutive_validation_failures += 1
-                messages.append(msg_obj.model_dump(exclude_none=True))
+                messages.append(assistant_msg)
 
                 if consecutive_validation_failures >= MAX_VALIDATION_RETRIES:
                     events.log_error.send(
@@ -388,14 +453,14 @@ def run_agent(
             consecutive_validation_failures = 0
 
             total_steps += 1
-            events.step_start.send("core", step=total_steps, prompt_tokens=resp.usage.prompt_tokens)
+            events.step_start.send("core", step=total_steps, prompt_tokens=usage.prompt_tokens if usage else 0)
 
             # Deduplicate logic based on description
             current_description = tool_args.get("description", "").strip() if tool_name == "execute_ipython" else ""
             duplicate_warning = check_duplicate_thought(current_description, prev_description)
             if duplicate_warning:
                 events.log_warn.send("core", text="Exact duplicate description detected.")
-                messages.append(msg_obj.model_dump(exclude_none=True))
+                messages.append(assistant_msg)
                 messages.append(
                     {
                         "role": "tool",
@@ -410,7 +475,7 @@ def run_agent(
                 prev_description = current_description
 
             # Append the LLM's assistant message
-            messages.append(msg_obj.model_dump(exclude_none=True))
+            messages.append(assistant_msg)
             if reasoning:
                 events.agent_thought.send("core", text=reasoning)
             if content:

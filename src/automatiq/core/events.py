@@ -29,6 +29,9 @@ code_exec_error = agent_signals.signal("code_exec_error")
 # Thought & Observation Events
 agent_thought = agent_signals.signal("agent_thought")
 agent_text = agent_signals.signal("agent_text")
+agent_thought_chunk = agent_signals.signal("agent_thought_chunk")
+agent_text_chunk = agent_signals.signal("agent_text_chunk")
+agent_stream_end = agent_signals.signal("agent_stream_end")
 tool_message = agent_signals.signal("tool_message")
 mode_switch = agent_signals.signal("mode_switch")
 
