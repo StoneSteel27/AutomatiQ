@@ -44,7 +44,34 @@ def _should_skip() -> bool:
     cols, _ = shutil.get_terminal_size((80, 24))
     if cols < _COLS_Q:
         return True
+    # NO_COLOR spec — https://no-color.org/
+    if os.environ.get("NO_COLOR"):
+        return True
+    # dumb terminal has no color/cursor support
+    if os.environ.get("TERM", "") == "dumb":
+        return True
+    # half-block chars (▀ ▄) require UTF-8 encoding
+    encoding = getattr(sys.stdout, "encoding", None) or ""
+    if encoding.lower() not in ("utf-8", "utf8"):
+        return True
     return False
+
+
+def _detect_color_mode() -> str:
+    """Detect the best color mode for the terminal.
+
+    Returns ``"truecolor"`` for 24-bit color terminals, or ``"256-letter"``
+    for 256-color terminals where each letter gets one solid gradient color.
+
+    Must be called **after** :func:`_should_skip` has returned ``False``.
+    """
+    from .console import console
+
+    cs = console.color_system
+    if cs == "truecolor":
+        return "truecolor"
+    # "256", "standard", "windows" — all support 256-color escape codes
+    return "256-letter"
 
 
 def _pick_frames_path() -> Path:
@@ -60,14 +87,6 @@ def _pick_frames_path() -> Path:
 RESET = "\033[0m"
 UPPER_HALF = "▀"
 LOWER_HALF = "▄"
-
-
-def _fg(r: int, g: int, b: int) -> str:
-    return f"\033[38;2;{r};{g};{b}m"
-
-
-def _bg(r: int, g: int, b: int) -> str:
-    return f"\033[48;2;{r};{g};{b}m"
 
 
 _PALETTE = [
@@ -100,6 +119,136 @@ def _shine_blend(rgb: tuple[int, int, int], t: float) -> tuple[int, int, int]:
     return tuple(int(rgb[i] + (255 - rgb[i]) * t) for i in range(3))
 
 
+# ── 256-color fallback helpers ──────────────────────────────────────────────
+
+
+def _build_xterm256_palette() -> list[tuple[int, int, int, int]]:
+    """Return list of (code, r, g, b) for all 256 xterm colors."""
+    palette: list[tuple[int, int, int, int]] = []
+    system = [
+        (0, 0, 0),
+        (128, 0, 0),
+        (0, 128, 0),
+        (128, 128, 0),
+        (0, 0, 128),
+        (128, 0, 128),
+        (0, 128, 128),
+        (192, 192, 192),
+        (128, 128, 128),
+        (255, 0, 0),
+        (0, 255, 0),
+        (255, 255, 0),
+        (0, 0, 255),
+        (255, 0, 255),
+        (0, 255, 255),
+        (255, 255, 255),
+    ]
+    for code, (r, g, b) in enumerate(system):
+        palette.append((code, r, g, b))
+    levels = [0, 95, 135, 175, 215, 255]
+    for r in range(6):
+        for g in range(6):
+            for b in range(6):
+                code = 16 + 36 * r + 6 * g + b
+                palette.append((code, levels[r], levels[g], levels[b]))
+    for i in range(24):
+        v = 8 + i * 10
+        palette.append((232 + i, v, v, v))
+    return palette
+
+
+_XTERM256 = _build_xterm256_palette()
+
+_256_NOGRAY_CACHE: dict[tuple[int, int, int], int] = {}
+
+
+def _rgb_to_256_nogray(r: int, g: int, b: int) -> int:
+    """Nearest-neighbor xterm-256 lookup, skipping the grayscale ramp (232-255).
+
+    Darkened colors with low R values (mint/cyan range) fall between
+    color-cube entries and wrongly match grayscale.  Excluding grayscale
+    forces them to the nearest colored cube entry instead.
+    """
+    key = (r, g, b)
+    cached = _256_NOGRAY_CACHE.get(key)
+    if cached is not None:
+        return cached
+    best_code = 0
+    best_dist = float("inf")
+    for code, pr, pg, pb in _XTERM256:
+        if 232 <= code <= 255:
+            continue
+        dr = (r - pr) * 0.30
+        dg = (g - pg) * 0.59
+        db = (b - pb) * 0.11
+        dist = dr * dr + dg * dg + db * db
+        if dist < best_dist:
+            best_dist = dist
+            best_code = code
+    _256_NOGRAY_CACHE[key] = best_code
+    return best_code
+
+
+def _256_shine(code: int, t: float) -> int:
+    """Blend a 256-color cube code toward white by t.
+
+    Interpolates each cube index toward 5 (max) so the flash sweeps
+    bright like the 24-bit version.
+    """
+    if t <= 0 or code < 16 or code > 231:
+        return code
+    code -= 16
+    r_idx = code // 36
+    g_idx = (code % 36) // 6
+    b_idx = code % 6
+    r_new = round(r_idx + (5 - r_idx) * t)
+    g_new = round(g_idx + (5 - g_idx) * t)
+    b_new = round(b_idx + (5 - b_idx) * t)
+    return 16 + 36 * r_new + 6 * g_new + b_new
+
+
+# ── Per-letter coloring for 256-color mode ──────────────────────────────────
+
+
+def _detect_letter_bounds(grid: list, gw: int) -> list[tuple[int, int]]:
+    """Find column gaps in a coalesced frame to determine letter boundaries.
+
+    Returns a list of (start_col, end_col) tuples, one per letter.
+    """
+    live_cols = sorted({c for row in grid for c, v in enumerate(row) if v is not None})
+    if not live_cols:
+        return []
+    bounds: list[tuple[int, int]] = []
+    start = live_cols[0]
+    for i in range(len(live_cols) - 1):
+        if live_cols[i + 1] - live_cols[i] > 1:
+            bounds.append((start, live_cols[i]))
+            start = live_cols[i + 1]
+    bounds.append((start, live_cols[-1]))
+    return bounds
+
+
+def _make_letter_col_fn(grid: list, gw: int):
+    """Return a function(col) -> hue that maps any column to its letter's hue.
+
+    Letter boundaries are detected from the coalesced frame, but the mapping
+    works for ANY column in ANY frame — cells are colored by where they ARE,
+    not by whether they exist in the final frame.
+    """
+    bounds = _detect_letter_bounds(grid, gw)
+    if not bounds:
+        return lambda c: 0.5
+    n = len(bounds)
+
+    def col_to_hue(c: int) -> float:
+        for i, (_lo, hi) in enumerate(bounds):
+            if c <= hi:
+                return i / max(n - 1, 1)
+        return 1.0
+
+    return col_to_hue
+
+
 def _load_frames(json_path: Path) -> tuple[list, int, int]:
     with open(json_path) as f:
         data = json.load(f)
@@ -113,15 +262,28 @@ def _load_frames(json_path: Path) -> tuple[list, int, int]:
     return grids, gh, gw
 
 
-def _render_cell_region(grid: list, h: int, w: int, shine_pos: float = -999) -> str:
+def _render_cell_region(
+    grid: list,
+    h: int,
+    w: int,
+    shine_pos: float = -999,
+    mode: str = "truecolor",
+    col_to_hue=None,
+) -> str:
     """Render the GoL grid into a single ANSI string using half-block chars.
 
     shine_pos: centre of the shine band expressed as a diagonal index.
                Grid row 0 is stored at the visual bottom, so the screen
                diagonal is (h-1-r)+c — value 0 is top-left, sweeping
                low→high moves the band top-left → bottom-right.
+
+    mode: ``"truecolor"`` for 24-bit ANSI (full gradient + shadows),
+          ``"256-letter"`` for xterm-256 (one solid color per letter,
+          no shadows, wider shine band).
+
+    col_to_hue: function(col) -> hue (0..1) for 256-letter mode.
     """
-    BAND_HALF = 3
+    BAND_HALF = 5 if mode == "256-letter" else 3
 
     lines = []
     for pr in range(0, h, 2):
@@ -132,6 +294,7 @@ def _render_cell_region(grid: list, h: int, w: int, shine_pos: float = -999) -> 
             bot_v = grid[bot_r][c] if bot_r < h else None
 
             # Shadow: pick up the hue of the cell diagonally above-left
+            # (skipped in 256-letter mode — shadows removed for simplicity)
             def _sh(r, c):
                 sr, sc = r - 1, c - 1
                 if 0 <= sr < h and 0 <= sc < w and grid[sr][sc] is not None:
@@ -139,39 +302,71 @@ def _render_cell_region(grid: list, h: int, w: int, shine_pos: float = -999) -> 
                 return None
 
             if top_v is None:
-                top_v = _sh(top_r, c)
+                sh = _sh(top_r, c) if mode != "256-letter" else None
+                top_v = sh
                 top_bright = False
             else:
                 top_bright = True
             if bot_v is None:
-                bot_v = _sh(bot_r, c)
+                sh = _sh(bot_r, c) if mode != "256-letter" else None
+                bot_v = sh
                 bot_bright = False
             else:
                 bot_bright = True
+
+            # In 256-letter mode, live cells get their hue from their column
+            # position so each letter has one solid gradient color.
+            if mode == "256-letter" and col_to_hue is not None:
+                top_hue = col_to_hue(c) if top_v is not None else None
+                bot_hue = col_to_hue(c) if bot_v is not None else None
+            else:
+                top_hue = top_v
+                bot_hue = bot_v
 
             def _shine_t(r, _c=c):
                 dist = abs(((h - 1 - r) + _c) - shine_pos)
                 if dist >= BAND_HALF:
                     return 0.0
-                return (1.0 - dist / BAND_HALF) * 0.85
+                peak = 1.0 if mode == "256-letter" else 0.85
+                return (1.0 - dist / BAND_HALF) * peak
 
             def _col(hue, bright, r):
+                if mode == "256-letter":
+                    code = _rgb_to_256_nogray(*_hue_rgb(hue))
+                    t = _shine_t(r)
+                    if t > 0:
+                        # Scale up so the flash reaches white at peak,
+                        # making the sweep visible on sparse live cells
+                        code = _256_shine(code, min(1.0, t * 1.5))
+                    return code
                 base = _hue_rgb(hue) if bright else _darken(_hue_rgb(hue))
                 t = _shine_t(r)
                 return _shine_blend(base, t) if t > 0 else base
 
-            if top_v is None and bot_v is None:
+            def _fg(val):
+                if mode == "truecolor":
+                    r, g, b = val
+                    return f"\033[38;2;{r};{g};{b}m"
+                return f"\033[38;5;{val}m"
+
+            def _bg(val):
+                if mode == "truecolor":
+                    r, g, b = val
+                    return f"\033[48;2;{r};{g};{b}m"
+                return f"\033[48;5;{val}m"
+
+            if top_hue is None and bot_hue is None:
                 line += " "
-            elif top_v is not None and bot_v is not None:
-                tc = _col(top_v, top_bright, top_r)
-                bc = _col(bot_v, bot_bright, bot_r)
-                line += _fg(*tc) + _bg(*bc) + UPPER_HALF + RESET
-            elif top_v is not None:
-                tc = _col(top_v, top_bright, top_r)
-                line += _fg(*tc) + UPPER_HALF + RESET
+            elif top_hue is not None and bot_hue is not None:
+                tc = _col(top_hue, top_bright, top_r)
+                bc = _col(bot_hue, bot_bright, bot_r)
+                line += _fg(tc) + _bg(bc) + UPPER_HALF + RESET
+            elif top_hue is not None:
+                tc = _col(top_hue, top_bright, top_r)
+                line += _fg(tc) + UPPER_HALF + RESET
             else:
-                bc = _col(bot_v, bot_bright, bot_r)
-                line += _fg(*bc) + LOWER_HALF + RESET
+                bc = _col(bot_hue, bot_bright, bot_r)
+                line += _fg(bc) + LOWER_HALF + RESET
 
         lines.append(line)
 
@@ -247,6 +442,9 @@ def show_startup(
         console.print(f"  [cyan]>[/cyan] [bold]automatiq[/bold] [dim]v{version} - {model}[/dim]")
         return
 
+    # Detect color capability and pick render mode
+    mode = _detect_color_mode()
+
     # Play in reverse: dissolved → coalesced
     frames = list(reversed(forward_frames))
     speed = max(speed, 0.01)
@@ -259,13 +457,24 @@ def show_startup(
     SHINE_DELAY = 0.0325
 
     final_frame = frames[-1]
+
+    # For 256-letter mode, compute column → hue mapping from the coalesced frame
+    col_to_hue = _make_letter_col_fn(final_frame, gw) if mode == "256-letter" else None
+
     from .console import console
 
     try:
         with Live(console=console, refresh_per_second=30, transient=False) as live:
             # Phase 1: coalesce animation
             for frame in frames:
-                live.update(_build_frame(_render_cell_region(frame, gh, gw), version, model, recorder_model))
+                live.update(
+                    _build_frame(
+                        _render_cell_region(frame, gh, gw, mode=mode, col_to_hue=col_to_hue),
+                        version,
+                        model,
+                        recorder_model,
+                    )
+                )
                 time.sleep(0.05 / speed)
 
             # Phase 2: shine sweeps across the fully-formed text
@@ -273,7 +482,12 @@ def show_startup(
                 t = si / SHINE_STEPS
                 shine_pos = SHINE_START + t * (SHINE_END - SHINE_START)
                 live.update(
-                    _build_frame(_render_cell_region(final_frame, gh, gw, shine_pos), version, model, recorder_model)
+                    _build_frame(
+                        _render_cell_region(final_frame, gh, gw, shine_pos, mode=mode, col_to_hue=col_to_hue),
+                        version,
+                        model,
+                        recorder_model,
+                    )
                 )
                 time.sleep(SHINE_DELAY / speed)
 
