@@ -34,7 +34,7 @@ _first_prompt = True
 # Streaming state
 _thought_buf: list[str] = []
 _text_buf: list[str] = []
-_stream_start_time = 0.0
+_session_start_time = 0.0
 _session_tokens = 0
 
 
@@ -98,10 +98,9 @@ def _build_stream_group():
     content_area = Group(*content_children) if content_children else Text("")
 
     # Status line
-    elapsed = int(time.monotonic() - _stream_start_time) if _stream_start_time else 0
-    total_chars = len(thought_full) + len(text_full)
+    elapsed = int(time.monotonic() - _session_start_time) if _session_start_time else 0
     status = Text(
-        f"elapsed: {elapsed}s | chars: {total_chars:,} | session: {_session_tokens:,} tokens",
+        f"elapsed: {elapsed}s | session: {_session_tokens:,} tokens",
         style="dim",
     )
 
@@ -163,7 +162,7 @@ def handle_agent_stream_end(sender, usage=None, **kwargs):
     """Stream completed normally — finalize with clean Markdown and stop Live."""
     global _active_live, _session_tokens
     if usage is not None:
-        _session_tokens += getattr(usage, "total_tokens", 0) or 0
+        _session_tokens += getattr(usage, "completion_tokens", 0) or 0
     if _active_live is not None:
         _active_live.update(_build_final_group())
         _stop_live()
@@ -204,14 +203,13 @@ def handle_code_exec_end(sender, **kwargs):
 
 @events.llm_request_start.connect
 def handle_llm_request_start(sender, **kwargs):
-    global _active_live, _thought_buf, _text_buf, _stream_start_time
+    global _active_live, _thought_buf, _text_buf
     # Stop any previous Live (retry after error)
     if _active_live is not None:
         _active_live.update(_build_final_group())
         _stop_live()
     _thought_buf = []
     _text_buf = []
-    _stream_start_time = time.monotonic()
     if _active_live is None:
         from .console import console
 
@@ -236,11 +234,13 @@ def handle_llm_request_end(sender, **kwargs):
 
 
 def run_agent_cli(cancel_token: CancelToken = None, stop_token: StopToken = None, target: str | None = None):
+    global _session_start_time
     if cancel_token is None:
         cancel_token = CancelToken()
     if stop_token is None:
         stop_token = StopToken()
 
+    _session_start_time = time.monotonic()
     input_queue = queue.Queue()
 
     @events.wait_start.connect
