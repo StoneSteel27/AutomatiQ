@@ -5,6 +5,36 @@ All notable changes to AutomatiQ are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] — 2026-06-30
+
+### Added
+- **Session resume** — new `automatiq resume [name]` command picks up a previous agent session from disk. All messages, cell outputs, mode, and metadata (token counts, llm_calls, cells_executed) are restored. Snapshots are saved incrementally after each tool call, so sessions survive crashes.
+- **LLM streaming** — the agent's LLM calls now stream in real-time. Thoughts and text are rendered live via a single persistent Rich `Live` region, replacing the old step-based UI. An elapsed timer and session token counter are displayed inline.
+- **Proxy support for the recording browser** — route Chrome through an HTTP or SOCKS proxy via `--proxy URL` / `--no-proxy` CLI flags or the `[recorder_proxy]` config section. Supports dynamic `"module:callable"` providers for rotating proxy services.
+- **`debug()` log level** — new `debug()` helper and `log_debug` signal. The file log always captures DEBUG-level output; the terminal shows `[DEBUG]` messages only when `--verbose` is passed. 17 diagnostic log calls across the recorder, sandbox, and bin_manager were downgraded from INFO to DEBUG.
+- **Restore progress bar** — `%restore` now displays a Rich progress bar showing how many cells have been re-executed.
+- **Banner 256-color fallback** — per-letter 256-color fallback for terminals without truecolor support.
+- `--name` flag added to the Rich help OPTIONS table.
+- Resume command section in README.
+
+### Changed
+- **Resume session picker rewritten** — uses a Rich `Table` showing session name + human-readable 12-hour timestamp. Sessions are preloaded during the banner animation to eliminate post-banner delay.
+- **Lazy session scanning** — `list_resumable_sessions()` no longer parses YAML files on scan; `messages_count` and `cell_count` are zero until `load_counts()` is called.
+- **Token tracking** — session token counter now includes prompt + completion tokens (was completion-only). Baseline is restored from saved metadata on resume.
+- **cell_counter on resume** — uses `max(saved_cell_counter, len(exec_history))` to avoid output cache collisions when the saved counter is stale.
+- **History folder rename** — the history directory is renamed to the current timestamp on save, keeping the latest snapshot at a predictable name.
+- **Session metadata restore** — `llm_calls`, `cells_executed`, `prompt_tokens`, `completion_tokens`, and `total_tokens` are restored from saved metadata when resuming.
+- **Elapsed timer** — now session-wide and tracks generation-only time (excludes tool execution and user input waits).
+- **Redundant log lines removed** — "Target URL", "AI Model", "Resuming session from:", and "Using session at:" deleted (duplicated by banner and panels).
+- Recorder modularized into `cdp/` (CDP event handlers) and `compile/` (network/WS/action compilers) subpackages.
+- Version bumped to `0.2.2`.
+
+### Fixed
+- **Tool-call flicker** — eliminated by using a single persistent `Live` region that transitions between streaming and tool-execution phases without re-creating the display.
+- **Spinner residue** — spinners now stop cleanly when idle, leaving no leftover characters on the terminal.
+- **Token explosion** — the session token counter no longer grows unboundedly across turns.
+- **Post-banner delay on resume** — `resume` added to the preload heavy-import block so litellm, IPython, and binaries load during the banner (previously `check_api_keys()` triggered a fresh litellm import after the banner).
+
 ## [0.2.1] — 2026-06-24
 
 ### Added
