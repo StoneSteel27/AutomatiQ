@@ -252,7 +252,12 @@ def handle_llm_request_end(sender, **kwargs):
 # ── CLI entry point ─────────────────────────────────────────────────────────
 
 
-def run_agent_cli(cancel_token: CancelToken = None, stop_token: StopToken = None, target: str | None = None):
+def run_agent_cli(
+    cancel_token: CancelToken = None,
+    stop_token: StopToken = None,
+    target: str | None = None,
+    resume_from: str | None = None,
+):
     if cancel_token is None:
         cancel_token = CancelToken()
     if stop_token is None:
@@ -298,6 +303,7 @@ def run_agent_cli(cancel_token: CancelToken = None, stop_token: StopToken = None
                 cancel_token=cancel_token,
                 stop_token=stop_token,
                 target=target,
+                resume_from=resume_from,
             )
         except Exception as exc:
             error(f"Agent loop crashed: {exc}")

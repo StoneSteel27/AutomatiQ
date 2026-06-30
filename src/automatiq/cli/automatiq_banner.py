@@ -383,7 +383,7 @@ def _gradient_slogan() -> Text:
     return t
 
 
-def _build_right_panel(version: str, model: str, recorder_model: str) -> Text:
+def _build_right_panel(version: str, model: str, recorder_model: str, session: str | None = None) -> Text:
     t = Text()
     t.append_text(_gradient_slogan())
     t.append("\n\n")
@@ -398,14 +398,19 @@ def _build_right_panel(version: str, model: str, recorder_model: str) -> Text:
     t.append("Recorder", style="dim")
     t.append(" ")
     t.append(recorder_model, style="white")
+    if session:
+        t.append("\n")
+        t.append("Session ", style="dim")
+        t.append(" ")
+        t.append(session, style="white")
     return t
 
 
-def _build_frame(cell_ansi: str, version: str, model: str, recorder_model: str) -> Table:
+def _build_frame(cell_ansi: str, version: str, model: str, recorder_model: str, session: str | None = None) -> Table:
     table = Table.grid(padding=(0, 1))
     table.add_column(no_wrap=True)
     table.add_column(no_wrap=True)
-    table.add_row(Text.from_ansi(cell_ansi), _build_right_panel(version, model, recorder_model))
+    table.add_row(Text.from_ansi(cell_ansi), _build_right_panel(version, model, recorder_model, session))
     return table
 
 
@@ -415,6 +420,7 @@ def show_startup(
     recorder_model: str = "",
     speed: float = 1.0,
     frames_path: Path | None = None,
+    session: str | None = None,
 ) -> None:
     """Play the Automatiq startup animation.
 
@@ -424,6 +430,7 @@ def show_startup(
         recorder_model: Recorder model name shown in the right panel.
         speed:          Multiplier — 1.0 = default, 2.0 = 2x faster, 0.5 = half speed.
         frames_path:    Path to gol_frames.json. Auto-detected if None.
+        session:        Optional session name shown in the right panel.
     """
     if _should_skip():
         from .console import console
@@ -473,6 +480,7 @@ def show_startup(
                         version,
                         model,
                         recorder_model,
+                        session,
                     )
                 )
                 time.sleep(0.05 / speed)
@@ -487,6 +495,7 @@ def show_startup(
                         version,
                         model,
                         recorder_model,
+                        session,
                     )
                 )
                 time.sleep(SHINE_DELAY / speed)

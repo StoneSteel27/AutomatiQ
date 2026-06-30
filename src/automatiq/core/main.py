@@ -5,8 +5,10 @@ import json
 import logging
 import os
 import queue
+import re
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import litellm
@@ -28,7 +30,15 @@ from .cancel_standard import (
     run_cancellable,
 )
 from .guardrails import check_duplicate_thought, check_final_script_bounce, check_repeated_execution
-from .history import compress_history, export_session_logs
+from .history import (
+    compress_history,
+    extract_recording_name,
+    init_history_dir,
+    load_session_messages,
+    load_session_metadata,
+    save_compressed_snapshot,
+    save_session_snapshot,
+)
 from .ipython_sandbox import AgentSandbox
 from .llm import call_llm_streaming, extract_message
 from .prompts import MODE_INJECTIONS, SYSTEM_PROMPT
@@ -93,26 +103,142 @@ def find_latest_session_dir(target: str | None = None) -> Path | None:
     return valid_sessions[0][0]
 
 
+def _reconstruct_exec_history(messages: list[dict]) -> list[tuple[str, str, int]]:
+    """Rebuild (display_script, output, cell_num) triples from message history.
+
+    Walks assistant tool_calls → tool responses, matching by tool_call_id.
+    Filters for execute_ipython only, skipping validation errors and duplicates.
+    Resolves dedup pointers ("output is the same as Cell_N...").
+    """
+    # Build a map: tool_call_id → tool message content
+    tool_responses: dict[str, str] = {}
+    for msg in messages:
+        if msg.get("role") == "tool" and msg.get("tool_call_id"):
+            tool_responses[msg["tool_call_id"]] = msg.get("content", "")
+
+    # Walk assistant messages, find execute_ipython tool calls
+    raw_cells: list[tuple[str, str]] = []  # (script, output) before numbering
+    cell_num = 0
+    for msg in messages:
+        if msg.get("role") != "assistant" or "tool_calls" not in msg:
+            continue
+        for tc in msg["tool_calls"]:
+            func = tc.get("function", {})
+            if func.get("name") != "execute_ipython":
+                continue
+            tc_id = tc.get("id")
+            if tc_id not in tool_responses:
+                continue
+            output = tool_responses[tc_id]
+            # Skip validation errors and duplicates (not real cells)
+            if (
+                output.startswith("SYSTEM: Tool Validation Error")
+                or output.startswith("SYSTEM: Validation failed repeatedly")
+                or output.startswith("SYSTEM: You have submitted the exact same description")
+            ):
+                continue
+            # Extract script from arguments
+            try:
+                args = json.loads(func.get("arguments", "{}"))
+            except json.JSONDecodeError:
+                continue
+            script = args.get("ipython_script", "")
+            desc = args.get("description", "")
+            display_script = f"# {desc}\n{script}" if desc else script
+            raw_cells.append((display_script.strip(), output))
+
+    # Resolve dedup pointers: "The output is the same as Cell_N..."
+    # and strip <terminal_output> wrapper for cache storage
+    resolved: list[tuple[str, str, int]] = []
+    cell_outputs_by_num: dict[int, str] = {}
+
+    for script, output in raw_cells:
+        cell_num += 1
+        # Check if this is a dedup pointer
+        match = re.search(r"output is the same as Cell_(\d+)", output)
+        if match:
+            ref_cell = int(match.group(1))
+            if ref_cell in cell_outputs_by_num:
+                output = cell_outputs_by_num[ref_cell]
+        # Strip <terminal_output> wrapper for cache
+        clean_output = re.sub(r"^<terminal_output>\n?", "", output)
+        clean_output = re.sub(r"\n?</terminal_output>$", "", clean_output)
+        cell_outputs_by_num[cell_num] = clean_output
+        resolved.append((script, clean_output, cell_num))
+
+    return resolved
+
+
 def run_agent(
     input_queue: queue.Queue,
     cancel_token: CancelToken = None,
     stop_token: StopToken = None,
     target: str | None = None,
+    resume_from: str | None = None,
 ):
     """Interactive agent loop. Reads from the workspace produced by the recorder."""
     if cancel_token is None:
         cancel_token = CancelToken()
 
-    session_dump = find_latest_session_dir(target)
-    if not session_dump:
-        if target:
-            events.log_error.send("core", text=f"No valid completed session found at {target}")
-        else:
-            events.log_error.send("core", text="No valid completed sessions found in the current directory.")
-        events.log_info.send(
-            "core", text="Run 'automatiq record <url>' first, or use 'automatiq run <url>' for one-shot."
-        )
-        sys.exit(1)
+    history_dir: Path | None = None
+
+    # ── Resume path: load messages + state from disk ────────────────────────
+    if resume_from:
+        history_dir = Path(resume_from)
+        if not (history_dir / "messages_full.yaml").exists():
+            events.log_error.send("core", text=f"No session history found at {history_dir}")
+            events.log_info.send("core", text="Use 'automatiq resume' to list available sessions.")
+            sys.exit(1)
+
+        events.log_info.send("core", text=f"Resuming session from: {history_dir}")
+        messages = load_session_messages(history_dir)
+        saved_meta = load_session_metadata(history_dir)
+
+        # Restore critical state from metadata (defaults for legacy sessions)
+        current_mode = saved_meta.get("current_mode", "reading") if saved_meta else "reading"
+        cell_counter = saved_meta.get("cell_counter", 0) if saved_meta else 0
+
+        # Reconstruct exec_history from messages
+        exec_history = _reconstruct_exec_history(messages)
+
+        # Derive recording session dir from history folder name
+        recording_name = extract_recording_name(history_dir.name)
+        session_dump = find_latest_session_dir(str(Path.cwd() / recording_name))
+        if not session_dump:
+            events.log_error.send(
+                "core",
+                text=f"Recording directory '{recording_name}' not found in current directory.",
+            )
+            events.log_info.send(
+                "core",
+                text=f"Make sure you're in the same directory where the recording folder '{recording_name}' exists.",
+            )
+            sys.exit(1)
+
+        # Preserve session start time from metadata
+        session_started = saved_meta.get("session_started") if saved_meta else None
+    else:
+        # ── Fresh start path ─────────────────────────────────────────────────
+        session_dump = find_latest_session_dir(target)
+        if not session_dump:
+            if target:
+                events.log_error.send("core", text=f"No valid completed session found at {target}")
+            else:
+                events.log_error.send("core", text="No valid completed sessions found in the current directory.")
+            events.log_info.send(
+                "core",
+                text="Run 'automatiq record <url>' first, or use 'automatiq run <url>' for one-shot.",
+            )
+            sys.exit(1)
+
+        current_mode = "reading"
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": f"{MODE_INJECTIONS['reading']}\n\nSession started. You are in reading mode."},
+        ]
+        exec_history = []
+        cell_counter = 0
+        session_started = None
 
     workspace_dir = session_dump / "workspace"
     events.log_info.send("core", text=f"Using session at: {session_dump}")
@@ -137,13 +263,38 @@ def run_agent(
             bin_path=str(config.BIN_DIR),
         )
 
-    # Initial state
-    current_mode = "reading"
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": f"{MODE_INJECTIONS['reading']}\n\nSession started. You are in reading mode."},
-    ]
+    # ── Resume: populate sandbox caches + inject system message ─────────────
+    if resume_from and exec_history:
+        for script, output, cell_num in exec_history:
+            sandbox.output_cache[f"Cell_{cell_num}"] = output
+            sandbox.history.append(script)
+        sandbox.cell_counter = cell_counter
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "SYSTEM: Session resumed from checkpoint. "
+                    f"{len(exec_history)} previous cell outputs available via %view_output. "
+                    "Kernel state is fresh — previous variables/imports are NOT available. "
+                    "Unless really necessary, use %restore to rebuild variables; otherwise proceed as normal."
+                ),
+            }
+        )
 
+    # ── Session metadata accumulator ────────────────────────────────────────
+    _session_meta: dict = {
+        "model": config.AGENT_MODEL,
+        "llm_calls": 0,
+        "cells_executed": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "session_started": session_started or datetime.now().isoformat(timespec="seconds"),
+        "current_mode": current_mode,
+        "cell_counter": cell_counter,
+    }
+
+    # ── Initial loop state ──────────────────────────────────────────────────
     needs_user_input = True
     awaiting_tool_complete = False
     awaiting_mode_switch = False
@@ -153,9 +304,7 @@ def run_agent(
     MAX_FINAL_SCRIPT_BOUNCES = 1
     MAX_VALIDATION_RETRIES = 3
 
-    exec_history: list[tuple[str, str, int]] = []
     consecutive_validation_failures = 0
-    cell_counter = 0
     prev_description = ""
     MAX_LLM_RETRIES = 5
     BASE_BACKOFF = 10
@@ -276,6 +425,13 @@ def run_agent(
                         events.agent_stream_end.send("core", usage=usage)
                     finally:
                         events.llm_request_end.send("core")
+
+                    # Track token usage in session metadata
+                    if usage:
+                        _session_meta["llm_calls"] += 1
+                        _session_meta["prompt_tokens"] += getattr(usage, "prompt_tokens", 0) or 0
+                        _session_meta["completion_tokens"] += getattr(usage, "completion_tokens", 0) or 0
+                        _session_meta["total_tokens"] += getattr(usage, "total_tokens", 0) or 0
 
                     reasoning = "".join(thought_buf) or None
                     content = "".join(text_buf)
@@ -460,6 +616,10 @@ def run_agent(
                         "content": "Final script delivered successfully to the user. Awaiting feedback.",
                     }
                 )
+                _session_meta["current_mode"] = current_mode
+                if history_dir is None:
+                    history_dir = init_history_dir(session_dump.name)
+                save_session_snapshot(history_dir, messages, _session_meta)
                 needs_user_input = True
                 continue
 
@@ -518,6 +678,12 @@ def run_agent(
                         f"Use %view_output Cell_{output_match_cell} if you need to review it."
                     )
                 exec_history.append((display_script.strip(), scr, current_cell))
+                _session_meta["cells_executed"] += 1
+                _session_meta["cell_counter"] = cell_counter
+                _session_meta["current_mode"] = current_mode
+                if history_dir is None:
+                    history_dir = init_history_dir(session_dump.name)
+                save_session_snapshot(history_dir, messages, _session_meta)
                 events.code_exec_output.send("core", output=scr)
 
                 tool_response_content = f"<terminal_output>\n{scr}\n</terminal_output>"
@@ -554,6 +720,10 @@ def run_agent(
                     f"{mode_injection}\n\n--- Research memo from previous mode ---\n{context_memo}"
                 )
                 awaiting_mode_switch = True
+                _session_meta["current_mode"] = current_mode
+                if history_dir is None:
+                    history_dir = init_history_dir(session_dump.name)
+                save_session_snapshot(history_dir, messages, _session_meta)
 
     except StopRequestedException:
         events.log_info.send("core", text="Agent loop stopped by user.")
@@ -564,13 +734,21 @@ def run_agent(
         sandbox.cancel()
     finally:
         try:
-            folder_name = export_session_logs(messages, session_dump.name)
+            _session_meta["session_ended"] = datetime.now().isoformat(timespec="seconds")
             try:
-                from ..cli.console import rename_file_logger
+                started_dt = datetime.fromisoformat(_session_meta["session_started"])
+                _session_meta["duration_seconds"] = int((datetime.now() - started_dt).total_seconds())
+            except (ValueError, TypeError):
+                _session_meta["duration_seconds"] = 0
 
-                rename_file_logger(folder_name)
-            except Exception as e:
-                events.log_warn.send("core", text=f"Could not rename log file: {e}")
+            if history_dir is None:
+                history_dir = init_history_dir(session_dump.name)
+            save_session_snapshot(history_dir, messages, _session_meta)
+            save_compressed_snapshot(history_dir, messages)
+
+            from ..cli.console import rename_file_logger
+
+            rename_file_logger(history_dir.name)
         except Exception as exc:
             events.log_error.send("core", text=f"Failed to save session logs: {exc}")
             events.log_traceback.send("core")

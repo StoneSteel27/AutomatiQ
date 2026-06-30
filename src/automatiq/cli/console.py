@@ -15,6 +15,7 @@ import threading
 import time
 import traceback
 from datetime import datetime
+from pathlib import Path
 
 try:
     import readline  # noqa: F401
@@ -360,6 +361,92 @@ def ask_session_name() -> str:
     finally:
         if _active_listener:
             _active_listener.resume()
+
+
+def ask_resume_session(dirs: list | None = None) -> Path | None:
+    """Interactively pick a session to resume.
+
+    If *dirs* is None: lists all resumable sessions, shows the latest in brackets,
+    Enter selects the latest, typed text filters for a numbered picker.
+    If *dirs* is provided (multiple matches): shows a numbered picker.
+    Returns the selected history_dir Path, or None if cancelled.
+    """
+    from ..core.history import list_resumable_sessions
+
+    global _active_listener
+
+    def _pause():
+        if _active_listener:
+            _active_listener.pause()
+
+    def _resume():
+        if _active_listener:
+            _active_listener.resume()
+
+    def _do_prompt(message: str) -> str:
+        _pause()
+        try:
+            time.sleep(0.1)
+            if HAS_PT:
+                return pt_prompt(HTML(f"<ansicyan><bold>{message}</bold></ansicyan>")).strip()
+            elif os.name != "nt":
+                return input(f"\x01\033[1;36m\x02{message}\x01\033[0m\x02").strip()
+            else:
+                return console.input(f"[bold cyan]{message}[/bold cyan]").strip()
+        finally:
+            _resume()
+
+    # ── No dirs provided: discover all resumable sessions ───────────────────
+    if dirs is None:
+        sessions = list_resumable_sessions()
+        if not sessions:
+            error("No resumable sessions found.")
+            return None
+
+        latest = sessions[0]
+        response = _do_prompt(f"Resume session [{latest.folder_name}]: ")
+
+        if not response:
+            return latest.history_dir
+
+        # Filter by response text
+        filtered = [s for s in sessions if response in s.recording_name or response in s.folder_name]
+        if len(filtered) == 1:
+            return filtered[0].history_dir
+        if not filtered:
+            error(f"No sessions matching '{response}'.")
+            return None
+        # Multiple matches — fall through to numbered picker
+        sessions = filtered
+
+    # ── Numbered picker for multiple matches ────────────────────────────────
+    else:
+        # dirs is a list of Path objects from find_history_dirs
+        all_sessions = list_resumable_sessions()
+        sessions = [s for s in all_sessions if s.history_dir in dirs]
+        if not sessions:
+            error("No matching sessions found.")
+            return None
+
+    info_text = "Multiple sessions matched:\n"
+    for i, s in enumerate(sessions, 1):
+        info_text += f"  {i}. {s.folder_name}   ({s.messages_count} msgs, {s.cell_count} cells)\n"
+    console.print(info_text)
+
+    choice = _do_prompt("Select [1]: ")
+    if not choice:
+        idx = 1
+    else:
+        try:
+            idx = int(choice)
+        except ValueError:
+            error(f"Invalid selection: {choice}")
+            return None
+
+    if 1 <= idx <= len(sessions):
+        return sessions[idx - 1].history_dir
+    error(f"Selection out of range: {idx}")
+    return None
 
 
 def start_cli_listeners(cancel_token: CancelToken, stop_token: StopToken, on_force_quit=None) -> CLIListener | None:

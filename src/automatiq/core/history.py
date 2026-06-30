@@ -1,13 +1,43 @@
 import base64
 import logging
-import os
+import re
+from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 
 import yaml
 
 from . import config
 
 logger = logging.getLogger(__name__)
+
+
+# ── YAML serialization helpers ──────────────────────────────────────────────
+
+
+class _SessionDumper(yaml.Dumper):
+    """Custom Dumper that renders multi-line strings as literal block scalars."""
+
+
+def _multiline_presenter(dumper, data):
+    if "\n" in data:
+        return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")
+    return dumper.represent_scalar("tag:yaml.org,2002:str", data)
+
+
+_SessionDumper.add_representer(str, _multiline_presenter)
+
+
+@dataclass
+class SessionInfo:
+    """Metadata about a resumable history session."""
+
+    folder_name: str
+    recording_name: str
+    timestamp: str
+    history_dir: Path
+    messages_count: int
+    cell_count: int
 
 
 def compress_history(messages: list[dict], cutoff_turn=10) -> list[dict]:
@@ -153,35 +183,163 @@ def compress_history(messages: list[dict], cutoff_turn=10) -> list[dict]:
     return compressed
 
 
-def export_session_logs(messages: list[dict], session_name: str = "unknown") -> str:
-    """Write session logs to output/history/ and return the folder name."""
+# ── Session persistence ─────────────────────────────────────────────────────
 
-    class _SessionDumper(yaml.Dumper):
-        pass
 
-    def multiline_presenter(dumper, data):
-        if "\n" in data:
-            return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")
-        return dumper.represent_scalar("tag:yaml.org,2002:str", data)
+_TIMESTAMP_SUFFIX = re.compile(r"^(.+)_(\d{8}_\d{6})$")
 
-    _SessionDumper.add_representer(str, multiline_presenter)
 
+def init_history_dir(session_name: str) -> Path:
+    """Create a new timestamped history folder and return its path."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     folder_name = f"{session_name}_{timestamp}"
-    target_dir = os.path.join(str(config.HISTORY_DIR), folder_name)
-    os.makedirs(target_dir, exist_ok=True)
+    history_dir = config.HISTORY_DIR / folder_name
+    history_dir.mkdir(parents=True, exist_ok=True)
+    return history_dir
 
-    # Save the full trace
-    uncompressed_path = os.path.join(target_dir, "messages_full.yaml")
-    with open(uncompressed_path, "w", encoding="utf-8") as f:
-        yaml.dump(messages, f, Dumper=_SessionDumper, sort_keys=False, allow_unicode=True)
-    logger.info(f"Saved full session history to {uncompressed_path}")
 
-    # Save the compressed version exactly as the LLM saw it
+def save_session_snapshot(history_dir: Path, messages: list[dict], metadata: dict) -> None:
+    """Write messages_full.yaml as {metadata: ..., messages: [...]}."""
+    payload = {"metadata": metadata, "messages": messages}
+    path = history_dir / "messages_full.yaml"
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.dump(payload, f, Dumper=_SessionDumper, sort_keys=False, allow_unicode=True)
+    logger.info(f"Saved session snapshot to {path}")
+
+
+def save_compressed_snapshot(history_dir: Path, messages: list[dict]) -> None:
+    """Write messages_compressed.yaml as a bare list (debug artifact only)."""
     compressed = compress_history(messages, cutoff_turn=20)
-    compressed_path = os.path.join(target_dir, "messages_compressed.yaml")
-    with open(compressed_path, "w", encoding="utf-8") as f:
+    path = history_dir / "messages_compressed.yaml"
+    with open(path, "w", encoding="utf-8") as f:
         yaml.dump(compressed, f, Dumper=_SessionDumper, sort_keys=False, allow_unicode=True)
-    logger.info(f"Saved compressed session history to {compressed_path}")
+    logger.info(f"Saved compressed session history to {path}")
 
+
+def load_session_messages(history_dir: Path) -> list[dict]:
+    """Load messages from messages_full.yaml.
+
+    Handles both legacy (bare list) and new ({metadata, messages} dict) formats.
+    """
+    path = history_dir / "messages_full.yaml"
+    with open(path, encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict) and "messages" in data:
+        return data["messages"]
+    raise ValueError(f"Unexpected YAML structure in {path}: {type(data).__name__}")
+
+
+def load_session_metadata(history_dir: Path) -> dict | None:
+    """Load metadata from messages_full.yaml.
+
+    Returns None for legacy sessions (bare-list format without metadata).
+    """
+    path = history_dir / "messages_full.yaml"
+    if not path.exists():
+        return None
+    with open(path, encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    if isinstance(data, dict):
+        return data.get("metadata")
+    return None
+
+
+def extract_recording_name(folder_name: str) -> str:
+    """Strip the trailing _YYYYMMDD_HHMMSS timestamp suffix from a history folder name."""
+    match = _TIMESTAMP_SUFFIX.match(folder_name)
+    if match:
+        return match.group(1)
     return folder_name
+
+
+def _count_cells(messages: list[dict]) -> int:
+    """Count real execute_ipython tool responses (excluding validation errors and duplicates)."""
+    count = 0
+    for msg in messages:
+        if msg.get("role") == "tool" and msg.get("name") == "execute_ipython":
+            content = str(msg.get("content", ""))
+            if (
+                content.startswith("SYSTEM: Tool Validation Error")
+                or content.startswith("SYSTEM: Validation failed repeatedly")
+                or content.startswith("SYSTEM: You have submitted the exact same description")
+            ):
+                continue
+            count += 1
+    return count
+
+
+def list_resumable_sessions() -> list[SessionInfo]:
+    """Scan HISTORY_DIR for sessions whose recording dir exists in cwd.
+
+    Returns sorted newest-first (by folder timestamp).
+    """
+    if not config.HISTORY_DIR.exists():
+        return []
+
+    cwd = Path.cwd()
+    sessions: list[SessionInfo] = []
+
+    for d in config.HISTORY_DIR.iterdir():
+        if not d.is_dir():
+            continue
+        messages_path = d / "messages_full.yaml"
+        if not messages_path.exists():
+            continue
+
+        recording_name = extract_recording_name(d.name)
+        recording_dir = cwd / recording_name
+        if not (recording_dir / "session_metadata.json").exists():
+            continue
+
+        # Extract timestamp from folder name for sorting
+        match = _TIMESTAMP_SUFFIX.match(d.name)
+        timestamp = match.group(2) if match else ""
+
+        try:
+            messages = load_session_messages(d)
+            messages_count = len(messages)
+        except Exception:
+            logger.debug(f"Could not load messages from {d}, skipping")
+            continue
+
+        cell_count = _count_cells(messages)
+
+        sessions.append(
+            SessionInfo(
+                folder_name=d.name,
+                recording_name=recording_name,
+                timestamp=timestamp,
+                history_dir=d,
+                messages_count=messages_count,
+                cell_count=cell_count,
+            )
+        )
+
+    sessions.sort(key=lambda s: s.timestamp, reverse=True)
+    return sessions
+
+
+def find_history_dirs(name: str | None = None) -> list[Path]:
+    """Find resumable history dirs matching *name* prefix.
+
+    If *name* is None, returns all resumable sessions.
+    Sorted newest-first.
+    """
+    sessions = list_resumable_sessions()
+    if name is not None:
+        sessions = [s for s in sessions if name in s.recording_name or name in s.folder_name]
+    return [s.history_dir for s in sessions]
+
+
+def export_session_logs(messages: list[dict], session_name: str = "unknown", metadata: dict | None = None) -> str:
+    """Write session logs to ~/.automatiq/history/ and return the folder name.
+
+    Creates a new timestamped folder, writes messages_full.yaml (with metadata)
+    and messages_compressed.yaml.
+    """
+    history_dir = init_history_dir(session_name)
+    save_session_snapshot(history_dir, messages, metadata or {})
+    save_compressed_snapshot(history_dir, messages)
+    return history_dir.name

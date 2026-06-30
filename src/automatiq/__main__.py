@@ -103,6 +103,34 @@ def _peek_output_dir() -> str | None:
     return None
 
 
+def _peek_session_name() -> str | None:
+    """Quick scan of cwd for latest recording session name (for banner display)."""
+    from pathlib import Path
+
+    cwd = Path.cwd()
+    latest, latest_mtime = None, 0.0
+    for d in cwd.iterdir():
+        meta = d / "session_metadata.json"
+        if d.is_dir() and meta.exists():
+            m = meta.stat().st_mtime
+            if m > latest_mtime:
+                latest_mtime, latest = m, d.name
+    return latest
+
+
+def _peek_resume_name() -> str | None:
+    """Peek at sys.argv for the positional name argument after 'resume'."""
+    argv = sys.argv[1:]
+    found_resume = False
+    for arg in argv:
+        if arg == "resume":
+            found_resume = True
+            continue
+        if found_resume and not arg.startswith("-"):
+            return arg
+    return None
+
+
 def _preload():
     global _preload_error
     try:
@@ -306,6 +334,47 @@ def cmd_agent(args):
             monitor.clear()
 
 
+def cmd_resume(args):
+    _apply_config_overrides(args)
+    from .core import config
+    from .core.key_checker import check_api_keys
+
+    check_api_keys(config.AGENT_MODEL)
+
+    from .cli.console import ask_resume_session, error, info, start_cli_listeners
+    from .cli.orchestrator import run_agent_cli
+    from .core.cancel_standard import CancelToken, StopToken
+    from .core.history import find_history_dirs
+
+    if args.name:
+        dirs = find_history_dirs(args.name)
+        if len(dirs) == 0:
+            error(f"No resumable sessions found matching '{args.name}'")
+            sys.exit(1)
+        history_dir = dirs[0] if len(dirs) == 1 else ask_resume_session(dirs)
+    else:
+        history_dir = ask_resume_session()
+
+    if history_dir is None:
+        info("Resume cancelled.")
+        sys.exit(0)
+
+    cancel_token = CancelToken()
+    stop_token = StopToken()
+
+    def handle_force_quit():
+        from .cli.console import save_crash_report
+
+        save_crash_report()
+
+    monitor = start_cli_listeners(cancel_token, stop_token, on_force_quit=handle_force_quit)
+    try:
+        run_agent_cli(cancel_token=cancel_token, stop_token=stop_token, resume_from=str(history_dir))
+    finally:
+        if monitor:
+            monitor.clear()
+
+
 def cmd_run(args):
     _apply_config_overrides(args)
     from .core import config
@@ -432,6 +501,7 @@ def _print_rich_help():
     t.add_column()
     t.add_row("record <url>", "Capture a browser session (screen + network + actions)")
     t.add_row("agent", "Analyse a recorded workspace and produce an automation script (defaults to latest)")
+    t.add_row("resume [name]", "Resume a previous agent session from history")
     t.add_row("run <url>", "Record a session then immediately launch the agent")
     console.print(t)
     console.print()
@@ -523,13 +593,28 @@ def main():
     if banner_base_url:
         config.API_BASE = banner_base_url
 
-    if config.BANNER_ENABLED and cmd in ("record", "agent", "run"):
+    if config.BANNER_ENABLED and cmd in ("record", "agent", "run", "resume"):
         _banner_done.clear()  # gate: buffer any preload logs during animation
+
+        # Determine session name for banner (agent and resume-with-name only)
+        banner_session = None
+        if cmd == "agent":
+            banner_session = _peek_session_name()
+        elif cmd == "resume":
+            resume_name = _peek_resume_name()
+            if resume_name:
+                from .core.history import extract_recording_name, find_history_dirs
+
+                dirs = find_history_dirs(resume_name)
+                if len(dirs) == 1:
+                    banner_session = extract_recording_name(dirs[0].name)
+
         show_startup(
             version=config.VERSION,
             model=banner_model,
             recorder_model=config.RECORDER_AI_MODEL,
             speed=config.BANNER_SPEED,
+            session=banner_session,
         )
         _banner_done.set()  # animation done: allow log output
         # Flush any logs that arrived during the banner
@@ -603,6 +688,11 @@ def main():
     _add_common_flags(p_agent)
     p_agent.add_argument("--target", type=str, default=None, help="Path to the session folder to agentic run on")
     p_agent.set_defaults(func=cmd_agent)
+
+    p_resume = subparsers.add_parser("resume", add_help=False)
+    p_resume.add_argument("name", nargs="?", default=None, help="Session name to resume (skips picker if unique match)")
+    _add_common_flags(p_resume)
+    p_resume.set_defaults(func=cmd_resume)
 
     p_run = subparsers.add_parser("run", add_help=False)
     p_run.add_argument("url", nargs="?", default="about:blank")
