@@ -60,7 +60,7 @@ def merge_and_annotate_actions(
             if on_skip_requested and on_skip_requested(remaining):
                 events.log_warn.send("recorder", text=f"Skipping AI analysis for remaining {remaining} segment(s).")
                 break
-            events.log_info.send("recorder", text="Continuing AI analysis...")
+            events.log_debug.send("recorder", text="Continuing AI analysis...")
 
         first_action_time_relative = cluster[0]["timestamp_unix"] - video_start_unix
         clip_start = max(0, first_action_time_relative - config.SEGMENT_PAD_SECONDS)
@@ -87,7 +87,7 @@ def merge_and_annotate_actions(
                 if on_skip_requested and on_skip_requested(remaining):
                     events.log_warn.send("recorder", text=f"Skipping AI analysis for remaining {remaining} segment(s).")
                     break
-                events.log_info.send("recorder", text="Continuing AI analysis...")
+                events.log_debug.send("recorder", text="Continuing AI analysis...")
                 continue
             events.log_info.send(
                 "recorder", text=f"[AI] Segment {idx:03d} summary: {ai_description.get('macro_summary')}"

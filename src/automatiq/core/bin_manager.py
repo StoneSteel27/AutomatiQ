@@ -153,7 +153,7 @@ def _download_file(
                         downloaded += len(chunk)
                         if progress_callback:
                             progress_callback(downloaded, total)
-            logger.info(f"Downloaded {display} ({dest.stat().st_size:,} bytes)")
+            logger.debug(f"Downloaded {display} ({dest.stat().st_size:,} bytes)")
             return  # success
         except OSError as exc:
             last_exc = exc

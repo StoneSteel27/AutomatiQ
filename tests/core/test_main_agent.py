@@ -509,3 +509,113 @@ def test_resume_legacy_list_format(session_dump_dir, mock_sandbox, mock_llm_stre
     call_args = mock_llm_stream.call_args
     passed_messages = call_args[0][0]
     assert any(m.get("content") == "Hello from legacy session" for m in passed_messages)
+
+
+def test_resume_legacy_cell_counter_from_exec_history(
+    session_dump_dir, mock_sandbox, mock_llm_stream, mock_history_dir, mocker
+):
+    """Legacy session (no metadata) with N cells should set cell_counter to N, not 0."""
+    import yaml
+
+    saved_messages = [
+        {"role": "system", "content": "You are AutomatiQ."},
+        {"role": "user", "content": "Hello"},
+        {
+            "role": "assistant",
+            "content": "Running code.",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "execute_ipython",
+                        "arguments": '{"description": "test", "ipython_script": "x = 1"}',
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "name": "execute_ipython",
+            "content": "<terminal_output>\n[Cell_1] Status: Success\n1\n</terminal_output>",
+        },
+        {
+            "role": "assistant",
+            "content": "More code.",
+            "tool_calls": [
+                {
+                    "id": "call_2",
+                    "type": "function",
+                    "function": {
+                        "name": "execute_ipython",
+                        "arguments": '{"description": "test2", "ipython_script": "y = 2"}',
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_2",
+            "name": "execute_ipython",
+            "content": "<terminal_output>\n[Cell_2] Status: Success\n2\n</terminal_output>",
+        },
+    ]
+    # Write as bare list (legacy format — no metadata)
+    with open(mock_history_dir / "messages_full.yaml", "w", encoding="utf-8") as f:
+        yaml.dump(saved_messages, f, sort_keys=False, allow_unicode=True)
+
+    mock_llm_stream.return_value = _empty_stream()
+    input_q = queue.Queue()
+    input_q.put("")
+    input_q.put("q")
+
+    run_agent(input_queue=input_q, resume_from=str(mock_history_dir))
+
+    # cell_counter should be 2 (len of exec_history), not 0
+    assert mock_sandbox.cell_counter == 2
+    assert "Cell_1" in mock_sandbox.output_cache
+    assert "Cell_2" in mock_sandbox.output_cache
+
+
+def test_resume_restores_token_counts(session_dump_dir, mock_sandbox, mock_llm_stream, mock_history_dir, mocker):
+    """Verify that token counts from saved metadata are restored as the baseline."""
+    saved_messages = [
+        {"role": "system", "content": "You are AutomatiQ."},
+        {"role": "user", "content": "Hello"},
+    ]
+    metadata = {
+        "current_mode": "reading",
+        "cell_counter": 0,
+        "llm_calls": 3,
+        "cells_executed": 2,
+        "prompt_tokens": 1500,
+        "completion_tokens": 800,
+        "total_tokens": 2300,
+        "session_started": "2026-06-29T10:00:00",
+    }
+    _write_session_yaml(mock_history_dir, saved_messages, metadata)
+
+    mock_llm_stream.return_value = _empty_stream()
+    input_q = queue.Queue()
+    input_q.put("")
+    input_q.put("q")
+
+    run_agent(input_queue=input_q, resume_from=str(mock_history_dir))
+
+    # The final saved metadata should include the restored baseline + the new call
+    import yaml as _yaml
+
+    # run_agent renames the folder to the current timestamp on save
+    history_dirs = sorted(mock_history_dir.parent.glob("test-session_*"))
+    assert history_dirs, "History dir not found after run"
+    with open(history_dirs[0] / "messages_full.yaml", encoding="utf-8") as f:
+        final_data = _yaml.safe_load(f)
+    final_meta = final_data["metadata"]
+    # 3 saved calls + 1 new call from _empty_stream
+    assert final_meta["llm_calls"] == 4
+    # 1500 saved + 100 from _empty_stream
+    assert final_meta["prompt_tokens"] == 1600
+    # 800 saved + 50 from _empty_stream
+    assert final_meta["completion_tokens"] == 850
+    assert final_meta["total_tokens"] == 2450

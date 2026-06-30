@@ -50,6 +50,26 @@ def test_magic_restore(sandbox: AgentSandbox):
     assert "saved" in result
 
 
+def test_magic_restore_resets_cell_counter(sandbox: AgentSandbox):
+    """%restore should reset cell_counter so re-executed cells get original IDs."""
+    sandbox.execute("x = 1")  # Cell_1
+    sandbox.execute("y = 2")  # Cell_2
+    assert sandbox.cell_counter == 2
+
+    # Simulate a crash that wiped the in-memory kernel state
+    sandbox.process.terminate()
+    sandbox.process.join()
+
+    sandbox.execute("%restore")
+
+    # After restore, cell_counter should be back to 2 (not 4)
+    assert sandbox.cell_counter == 2
+    # output_cache should have Cell_1 and Cell_2 (not Cell_3/Cell_4)
+    assert "Cell_1" in sandbox.output_cache
+    assert "Cell_2" in sandbox.output_cache
+    assert "Cell_3" not in sandbox.output_cache
+
+
 def test_shell_command(sandbox: AgentSandbox):
     """Test shell command via ! escapes"""
     # Use echo, should work on both Windows (jailed busybox) and POSIX

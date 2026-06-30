@@ -17,6 +17,7 @@ EXPECTED_SIGNALS = [
     "code_exec_start",
     "code_exec_output",
     "code_exec_end",
+    "restore_progress",
     # Thought & Observation
     "agent_thought_chunk",
     "agent_text_chunk",
@@ -28,6 +29,7 @@ EXPECTED_SIGNALS = [
     "operation_cancelled",
     # Logging
     "log_info",
+    "log_debug",
     "log_warn",
     "log_error",
     "log_traceback",

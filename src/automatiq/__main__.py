@@ -64,6 +64,7 @@ class _GatedRichHandler(logging.Handler):
 # ---------------------------------------------------------------------------
 
 _preload_error = None  # captured if preload raises unexpectedly
+_preloaded_sessions = None  # pre-scanned history sessions for resume (during banner)
 
 
 def _peek_command() -> str:
@@ -132,7 +133,7 @@ def _peek_resume_name() -> str | None:
 
 
 def _preload():
-    global _preload_error
+    global _preload_error, _preloaded_sessions
     try:
         from .core import config
 
@@ -178,7 +179,7 @@ def _preload():
 
         init_file_logger(str(config.LOGS_DIR))
 
-        if cmd in ("agent", "run", ""):
+        if cmd in ("agent", "run", "", "resume"):
             import IPython  # noqa: F401
             import litellm  # noqa: F401
             import yaml  # noqa: F401
@@ -201,6 +202,12 @@ def _preload():
                 import litellm  # noqa: F401
 
                 litellm.suppress_debug_info = not _is_verbose
+
+        if cmd == "resume":
+            from .core.history import list_resumable_sessions
+
+            global _preloaded_sessions
+            _preloaded_sessions = list_resumable_sessions()
 
     except Exception as exc:
         _preload_error = exc
@@ -344,16 +351,28 @@ def cmd_resume(args):
     from .cli.console import ask_resume_session, error, info, start_cli_listeners
     from .cli.orchestrator import run_agent_cli
     from .core.cancel_standard import CancelToken, StopToken
-    from .core.history import find_history_dirs
 
     if args.name:
-        dirs = find_history_dirs(args.name)
-        if len(dirs) == 0:
-            error(f"No resumable sessions found matching '{args.name}'")
-            sys.exit(1)
-        history_dir = dirs[0] if len(dirs) == 1 else ask_resume_session(dirs)
+        if _preloaded_sessions is not None:
+            filtered = [s for s in _preloaded_sessions if args.name in s.recording_name or args.name in s.folder_name]
+            if len(filtered) == 0:
+                error(f"No resumable sessions found matching '{args.name}'")
+                sys.exit(1)
+            history_dir = (
+                filtered[0].history_dir
+                if len(filtered) == 1
+                else ask_resume_session(dirs=[s.history_dir for s in filtered], sessions=filtered)
+            )
+        else:
+            from .core.history import find_history_dirs
+
+            dirs = find_history_dirs(args.name)
+            if len(dirs) == 0:
+                error(f"No resumable sessions found matching '{args.name}'")
+                sys.exit(1)
+            history_dir = dirs[0] if len(dirs) == 1 else ask_resume_session(dirs)
     else:
-        history_dir = ask_resume_session()
+        history_dir = ask_resume_session(sessions=_preloaded_sessions)
 
     if history_dir is None:
         info("Resume cancelled.")
@@ -543,6 +562,7 @@ def _print_rich_help():
     t4 = Table(show_header=False, box=None, collapse_padding=True)
     t4.add_column(style="bold", min_width=24)
     t4.add_column()
+    t4.add_row("--name NAME", "Custom name for the session folder (record/run only)")
     t4.add_row("--target PATH", "Path to a specific session folder to run the agent on")
     t4.add_row("--model MODEL", f"LiteLLM model string for the agent (default: {config.AGENT_MODEL})")
     t4.add_row("--recorder-model MODEL", f"Vision model for video-clip analysis (default: {config.RECORDER_AI_MODEL})")
@@ -601,13 +621,7 @@ def main():
         if cmd == "agent":
             banner_session = _peek_session_name()
         elif cmd == "resume":
-            resume_name = _peek_resume_name()
-            if resume_name:
-                from .core.history import extract_recording_name, find_history_dirs
-
-                dirs = find_history_dirs(resume_name)
-                if len(dirs) == 1:
-                    banner_session = extract_recording_name(dirs[0].name)
+            banner_session = _peek_resume_name()
 
         show_startup(
             version=config.VERSION,

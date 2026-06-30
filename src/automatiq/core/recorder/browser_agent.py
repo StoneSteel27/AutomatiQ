@@ -135,7 +135,7 @@ class BrowserAgent(_TargetManager, _NetworkHandlers, _WebsocketHandlers):
             main_session_id = getattr(self.tab, "session_id", "main")
             self.tabs[main_session_id] = {"tab": self.tab, "type": "page", "url": "about:blank"}
 
-            events.log_info.send("recorder", text="Enabling CDP domains and binding handlers...")
+            events.log_debug.send("recorder", text="Enabling CDP domains and binding handlers...")
 
             # Prioritize network domain
             await self.tab.send(
@@ -174,7 +174,7 @@ class BrowserAgent(_TargetManager, _NetworkHandlers, _WebsocketHandlers):
                 await asyncio.sleep(0.1)
 
         except asyncio.CancelledError:
-            events.log_info.send("recorder", text="Session asyncio loop cancelled.")
+            events.log_debug.send("recorder", text="Session asyncio loop cancelled.")
             if stop_token:
                 stop_token.stop()
         except KeyboardInterrupt:

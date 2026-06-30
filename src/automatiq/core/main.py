@@ -181,6 +181,7 @@ def run_agent(
         cancel_token = CancelToken()
 
     history_dir: Path | None = None
+    saved_meta: dict | None = None
 
     # ── Resume path: load messages + state from disk ────────────────────────
     if resume_from:
@@ -190,16 +191,19 @@ def run_agent(
             events.log_info.send("core", text="Use 'automatiq resume' to list available sessions.")
             sys.exit(1)
 
-        events.log_info.send("core", text=f"Resuming session from: {history_dir}")
         messages = load_session_messages(history_dir)
         saved_meta = load_session_metadata(history_dir)
 
         # Restore critical state from metadata (defaults for legacy sessions)
         current_mode = saved_meta.get("current_mode", "reading") if saved_meta else "reading"
-        cell_counter = saved_meta.get("cell_counter", 0) if saved_meta else 0
 
         # Reconstruct exec_history from messages
         exec_history = _reconstruct_exec_history(messages)
+
+        # cell_counter must be at least len(exec_history) so new cells don't
+        # collide with restored Cell_1..Cell_N in output_cache
+        saved_cell_counter = saved_meta.get("cell_counter", 0) if saved_meta else 0
+        cell_counter = max(saved_cell_counter, len(exec_history))
 
         # Derive recording session dir from history folder name
         recording_name = extract_recording_name(history_dir.name)
@@ -241,7 +245,6 @@ def run_agent(
         session_started = None
 
     workspace_dir = session_dump / "workspace"
-    events.log_info.send("core", text=f"Using session at: {session_dump}")
 
     global _preloaded_sandbox
     if _preloaded_sandbox:
@@ -284,11 +287,11 @@ def run_agent(
     # ── Session metadata accumulator ────────────────────────────────────────
     _session_meta: dict = {
         "model": config.AGENT_MODEL,
-        "llm_calls": 0,
-        "cells_executed": 0,
-        "prompt_tokens": 0,
-        "completion_tokens": 0,
-        "total_tokens": 0,
+        "llm_calls": saved_meta.get("llm_calls", 0) if saved_meta else 0,
+        "cells_executed": saved_meta.get("cells_executed", 0) if saved_meta else 0,
+        "prompt_tokens": saved_meta.get("prompt_tokens", 0) if saved_meta else 0,
+        "completion_tokens": saved_meta.get("completion_tokens", 0) if saved_meta else 0,
+        "total_tokens": saved_meta.get("total_tokens", 0) if saved_meta else 0,
         "session_started": session_started or datetime.now().isoformat(timespec="seconds"),
         "current_mode": current_mode,
         "cell_counter": cell_counter,
@@ -647,9 +650,16 @@ def run_agent(
 
                 try:
                     events.code_exec_start.send("core", script=display_script)
+                    if script_to_run.strip() == "%restore":
+                        sandbox.progress_callback = lambda cur, tot: events.restore_progress.send(
+                            "core", current=cur, total=tot
+                        )
+                    else:
+                        sandbox.progress_callback = None
                     try:
                         scr = run_cancellable(cancel_token, sandbox.execute, script_to_run, stop_token=stop_token)
                     finally:
+                        sandbox.progress_callback = None
                         events.code_exec_end.send("core")
                 except CancelRequestedException:
                     sandbox.cancel()
@@ -745,6 +755,12 @@ def run_agent(
                 history_dir = init_history_dir(session_dump.name)
             save_session_snapshot(history_dir, messages, _session_meta)
             save_compressed_snapshot(history_dir, messages)
+
+            recording_name = extract_recording_name(history_dir.name)
+            new_dir = history_dir.parent / f"{recording_name}_{datetime.now():%Y%m%d_%H%M%S}"
+            if new_dir != history_dir and not new_dir.exists():
+                history_dir.rename(new_dir)
+                history_dir = new_dir
 
             from ..cli.console import rename_file_logger
 

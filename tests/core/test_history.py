@@ -262,6 +262,39 @@ class TestListResumableSessions:
         assert sessions[0].recording_name == "recording-b"
         assert sessions[1].recording_name == "recording-a"
 
+    def test_counts_are_zero_until_loaded(self, mock_history_dir, tmp_path, sample_messages, sample_metadata, mocker):
+        """list_resumable_sessions should NOT load YAML — counts default to 0."""
+        mocker.patch("pathlib.Path.cwd", return_value=tmp_path)
+
+        recording_dir = tmp_path / "test-recording"
+        recording_dir.mkdir()
+        (recording_dir / "session_metadata.json").write_text(json.dumps({"status": "completed"}))
+
+        history_dir = init_history_dir("test-recording")
+        save_session_snapshot(history_dir, sample_messages, sample_metadata)
+
+        sessions = list_resumable_sessions()
+        assert len(sessions) == 1
+        assert sessions[0].messages_count == 0
+        assert sessions[0].cell_count == 0
+
+    def test_load_counts(self, mock_history_dir, tmp_path, sample_messages, sample_metadata, mocker):
+        """load_counts() should populate messages_count and cell_count from YAML."""
+        mocker.patch("pathlib.Path.cwd", return_value=tmp_path)
+
+        recording_dir = tmp_path / "test-recording"
+        recording_dir.mkdir()
+        (recording_dir / "session_metadata.json").write_text(json.dumps({"status": "completed"}))
+
+        history_dir = init_history_dir("test-recording")
+        save_session_snapshot(history_dir, sample_messages, sample_metadata)
+
+        sessions = list_resumable_sessions()
+        sessions[0].load_counts()
+        # sample_messages has 5 messages and 1 execute_ipython cell
+        assert sessions[0].messages_count == 5
+        assert sessions[0].cell_count == 1
+
 
 # ── find_history_dirs ───────────────────────────────────────────────────────
 

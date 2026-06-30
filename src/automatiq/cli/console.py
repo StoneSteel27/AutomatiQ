@@ -38,15 +38,17 @@ from rich.markup import escape
 from rich.panel import Panel
 from rich.rule import Rule
 from rich.syntax import Syntax
+from rich.table import Table
 from rich.text import Text
 from rich.theme import Theme
 
-from ..core import events
+from ..core import config, events
 from ..core.cancel_standard import CancelToken, StopToken
 
 _theme = Theme(
     {
         "info": "bold cyan",
+        "debug": "dim",
         "warn": "bold yellow",
         "error": "bold red",
         "success": "bold green",
@@ -168,6 +170,13 @@ def info(msg: str) -> None:
     first_line = str(msg).splitlines()[0] if str(msg).splitlines() else str(msg)
     console.print(f"[info]\\[INFO][/info] {escape(first_line)}")
     _log(logging.INFO, msg)
+
+
+def debug(msg: str) -> None:
+    if config.VERBOSE:
+        first_line = str(msg).splitlines()[0] if str(msg).splitlines() else str(msg)
+        console.print(f"[debug]\\[DEBUG][/debug] {escape(first_line)}")
+    _log(logging.DEBUG, msg)
 
 
 def warn(msg: str) -> None:
@@ -363,12 +372,14 @@ def ask_session_name() -> str:
             _active_listener.resume()
 
 
-def ask_resume_session(dirs: list | None = None) -> Path | None:
+def ask_resume_session(dirs: list | None = None, sessions: list | None = None) -> Path | None:
     """Interactively pick a session to resume.
 
-    If *dirs* is None: lists all resumable sessions, shows the latest in brackets,
-    Enter selects the latest, typed text filters for a numbered picker.
-    If *dirs* is provided (multiple matches): shows a numbered picker.
+    Always shows a numbered picker of available sessions.
+    Enter selects the first (latest) session, or type a number/index.
+    If *dirs* is provided, only those sessions are shown.
+    If *sessions* is provided, use them instead of scanning HISTORY_DIR
+    (avoids re-scanning when the preload thread already did it).
     Returns the selected history_dir Path, or None if cancelled.
     """
     from ..core.history import list_resumable_sessions
@@ -396,52 +407,66 @@ def ask_resume_session(dirs: list | None = None) -> Path | None:
         finally:
             _resume()
 
-    # ── No dirs provided: discover all resumable sessions ───────────────────
-    if dirs is None:
-        sessions = list_resumable_sessions()
-        if not sessions:
-            error("No resumable sessions found.")
-            return None
+    # ── Gather sessions to display ──────────────────────────────────────────
+    all_sessions = sessions if sessions is not None else list_resumable_sessions()
+    if not all_sessions:
+        error("No resumable sessions found.")
+        return None
 
-        latest = sessions[0]
-        response = _do_prompt(f"Resume session [{latest.folder_name}]: ")
-
-        if not response:
-            return latest.history_dir
-
-        # Filter by response text
-        filtered = [s for s in sessions if response in s.recording_name or response in s.folder_name]
-        if len(filtered) == 1:
-            return filtered[0].history_dir
-        if not filtered:
-            error(f"No sessions matching '{response}'.")
-            return None
-        # Multiple matches — fall through to numbered picker
-        sessions = filtered
-
-    # ── Numbered picker for multiple matches ────────────────────────────────
-    else:
-        # dirs is a list of Path objects from find_history_dirs
-        all_sessions = list_resumable_sessions()
+    if dirs is not None:
         sessions = [s for s in all_sessions if s.history_dir in dirs]
         if not sessions:
             error("No matching sessions found.")
             return None
+    else:
+        sessions = all_sessions
 
-    info_text = "Multiple sessions matched:\n"
+    # ── Show numbered picker ─────────────────────────────────────────────────
+    console.print()
+    t = Table(show_header=False, box=None, collapse_padding=True, padding=(0, 1))
+    t.add_column(style="bold cyan", width=5)
+    t.add_column(style="bold", min_width=20)
+    t.add_column(style="dim")
     for i, s in enumerate(sessions, 1):
-        info_text += f"  {i}. {s.folder_name}   ({s.messages_count} msgs, {s.cell_count} cells)\n"
-    console.print(info_text)
+        marker = " (latest)" if i == 1 else ""
+        t.add_row(f"{i}.", f"{s.recording_name}{marker}", s.human_timestamp)
+    console.print(t)
+    console.print()
 
-    choice = _do_prompt("Select [1]: ")
+    choice = _do_prompt("Select session [1]: ")
     if not choice:
         idx = 1
     else:
         try:
             idx = int(choice)
         except ValueError:
-            error(f"Invalid selection: {choice}")
-            return None
+            # Try matching by name text
+            filtered = [s for s in sessions if choice in s.recording_name or choice in s.folder_name]
+            if len(filtered) == 1:
+                return filtered[0].history_dir
+            if not filtered:
+                error(f"No sessions matching '{choice}'.")
+                return None
+            # Multiple name matches — show sub-picker
+            sessions = filtered
+            console.print()
+            t2 = Table(show_header=False, box=None, collapse_padding=True, padding=(0, 1))
+            t2.add_column(style="bold cyan", width=5)
+            t2.add_column(style="bold", min_width=20)
+            t2.add_column(style="dim")
+            for i, s in enumerate(sessions, 1):
+                t2.add_row(f"{i}.", s.recording_name, s.human_timestamp)
+            console.print(t2)
+            console.print()
+            choice = _do_prompt("Select [1]: ")
+            if not choice:
+                idx = 1
+            else:
+                try:
+                    idx = int(choice)
+                except ValueError:
+                    error(f"Invalid selection: {choice}")
+                    return None
 
     if 1 <= idx <= len(sessions):
         return sessions[idx - 1].history_dir
@@ -543,6 +568,11 @@ def handle_log_info(sender, text, **kwargs):
         ai(text.replace("[AI]", "", 1).strip())
     else:
         info(text)
+
+
+@events.log_debug.connect
+def handle_log_debug(sender, text, **kwargs):
+    debug(text)
 
 
 @events.log_warn.connect

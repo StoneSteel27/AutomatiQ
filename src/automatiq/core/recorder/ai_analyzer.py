@@ -170,7 +170,7 @@ class VideoActionAnalyzer:
         for b64 in base64_frames:
             content.append({"type": "image_url", "image_url": {"url": b64}})
 
-        events.log_info.send("recorder", text=f"Prompting Vision AI with {len(base64_frames)} frames...")
+        events.log_debug.send("recorder", text=f"Prompting Vision AI with {len(base64_frames)} frames...")
 
         try:
             schema_json = json.dumps(VideoActionAnalysis.model_json_schema())

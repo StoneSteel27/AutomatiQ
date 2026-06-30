@@ -44,7 +44,7 @@ class ActionVideoRecorder:
 
     def _record_loop(self) -> None:
         """The core recording loop executed by the background thread."""
-        events.log_info.send("recorder", text=f"Initializing video writer at {self.fps} FPS...")
+        events.log_debug.send("recorder", text=f"Initializing video writer at {self.fps} FPS...")
         writer = None
 
         try:

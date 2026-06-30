@@ -31,7 +31,7 @@ def _init_blocklist() -> BlocklistDB:
             events.log_info.send("recorder", text=f"Downloading blocklist '{name}' ...")
             try:
                 urllib.request.urlretrieve(url, str(hosts_file))
-                events.log_info.send("recorder", text=f"Saved {hosts_file.name}")
+                events.log_debug.send("recorder", text=f"Saved {hosts_file.name}")
             except Exception as exc:
                 events.log_warn.send("recorder", text=f"Failed to download blocklist '{name}': {exc}")
                 continue
@@ -107,8 +107,6 @@ def run_recording(
     _browser_agent = BrowserAgent(blocklist=blocklist, proxy=proxy)
 
     events.log_info.send("recorder", text="[RULE] STARTING RECORDER")
-    events.log_info.send("recorder", text=f"Target URL : {url}")
-    events.log_info.send("recorder", text=f"AI Model   : {config.RECORDER_AI_MODEL}")
     events.log_info.send("recorder", text=f"Blocklist  : {blocklist.total_enabled_domains()} domains loaded")
     events.log_info.send("recorder", text=f"Proxy      : {proxy if proxy else 'direct (no proxy)'}")
 

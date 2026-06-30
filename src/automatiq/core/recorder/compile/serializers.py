@@ -13,7 +13,7 @@ try:
 
     magika_detector = Magika()
     MAGIKA_AVAILABLE = True
-    events.log_info.send("recorder", text="Magika AI detector initialized successfully.")
+    events.log_debug.send("recorder", text="Magika AI detector initialized successfully.")
 except ImportError:
     magika_detector = None
     MAGIKA_AVAILABLE = False

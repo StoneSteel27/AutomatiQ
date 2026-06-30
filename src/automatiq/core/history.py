@@ -39,6 +39,24 @@ class SessionInfo:
     messages_count: int
     cell_count: int
 
+    @property
+    def human_timestamp(self) -> str:
+        """Return the timestamp in human-readable form (e.g. 'Jun 30, 2026 14:32')."""
+        try:
+            dt = datetime.strptime(self.timestamp, "%Y%m%d_%H%M%S")
+            return dt.strftime("%b %d, %Y %I:%M %p")
+        except (ValueError, TypeError):
+            return self.timestamp
+
+    def load_counts(self) -> None:
+        """Lazily load messages_count and cell_count from the YAML file."""
+        try:
+            messages = load_session_messages(self.history_dir)
+            self.messages_count = len(messages)
+            self.cell_count = _count_cells(messages)
+        except Exception:
+            logger.debug(f"Could not load messages from {self.history_dir}")
+
 
 def compress_history(messages: list[dict], cutoff_turn=10) -> list[dict]:
     """
@@ -274,6 +292,8 @@ def list_resumable_sessions() -> list[SessionInfo]:
     """Scan HISTORY_DIR for sessions whose recording dir exists in cwd.
 
     Returns sorted newest-first (by folder timestamp).
+    Does NOT load YAML files — messages_count and cell_count are 0 until
+    load_counts() is called explicitly.
     """
     if not config.HISTORY_DIR.exists():
         return []
@@ -297,23 +317,14 @@ def list_resumable_sessions() -> list[SessionInfo]:
         match = _TIMESTAMP_SUFFIX.match(d.name)
         timestamp = match.group(2) if match else ""
 
-        try:
-            messages = load_session_messages(d)
-            messages_count = len(messages)
-        except Exception:
-            logger.debug(f"Could not load messages from {d}, skipping")
-            continue
-
-        cell_count = _count_cells(messages)
-
         sessions.append(
             SessionInfo(
                 folder_name=d.name,
                 recording_name=recording_name,
                 timestamp=timestamp,
                 history_dir=d,
-                messages_count=messages_count,
-                cell_count=cell_count,
+                messages_count=0,
+                cell_count=0,
             )
         )
 

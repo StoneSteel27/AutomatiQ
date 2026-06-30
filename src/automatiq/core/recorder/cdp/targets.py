@@ -144,7 +144,7 @@ class _TargetManager:
                 return
 
             self.tabs[event.session_id] = {"tab": tab_session, "type": "page", "url": target_info.url}
-            events.log_info.send("recorder", text=f"Successfully bound CDP to new tab: {target_info.target_id}")
+            events.log_debug.send("recorder", text=f"Successfully bound CDP to new tab: {target_info.target_id}")
 
             try:
                 # Prioritize network domain to catch immediate websocket handshakes and HTTP requests

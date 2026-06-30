@@ -34,25 +34,6 @@ AutomatiQ records HTTP requests, Websocket frames, and your interactions for rev
 2. **Compile (Vision Analysis)** ⟶ The recording is split into per-action video clips. A vision LLM watches each clip and produces structured annotations (what was clicked, what changed, whether the action succeeded). Network requests are decoded, deduplicated, and structured into a workspace dump.
 3. **Agent (Sandbox Execution)** ⟶ An LLM investigator reads the workspace dump, experiments in an isolated Python/IPython environment, and iteratively produces a working script. It can test hypotheses against the live site with guardrails against loops and repetition.
 
-## Sponsor
-
-<a href="https://go.nodemaven.com/automatiq">
-  <img align="right" src="https://raw.githubusercontent.com/StoneSteel27/AutomatiQ/main/assets/nodemaven_banner.png" alt="NodeMaven - High Quality Proxies" width="400">
-</a>
-
-Running web automation and scraping scripts reliably requires high-quality proxies to avoid rate limits, IP bans, and CAPTCHA blocks. [NodeMaven](https://go.nodemaven.com/automatiq) is our recommended provider.
-
-**Why NodeMaven?**
-- You get **99.9% uptime** with sticky sessions lasting up to 7 days.
-- All proxies have a **fraud score under 97%** while requiring **No KYC** for registration.
-- You can earn up to **10% cashback** on the data you use.
-
-🎁 **Special codes for AutomatiQ users:**
-- `AUTOMATIQ35` - **35% off** Mobile and Residential Proxies
-- `AUTOMATIQ40` - **40% off** ISP (Static) Proxies
-
-Maintaining this open-source project sustainably is made possible thanks to our sponsor, **NodeMaven**.
-
 ## Getting Started
 
 **Requirements:** Python 3.11+ and [Google Chrome](https://www.google.com/chrome/)
@@ -81,7 +62,7 @@ That's it. Browse the site, press `Ctrl+C`, and the agent takes over.
 
 ## Usage Modes
 
-AutomatiQ offers two main ways to operate depending on your workflow:
+AutomatiQ offers three ways to operate depending on your workflow:
 
 ### 1. All-in-one execution
 The `run` command records a session and immediately launches the agent to write the script.
@@ -96,6 +77,35 @@ automatiq record https://example.com   # Opens the browser and records your sess
 automatiq agent                        # Builds an automation script from the last recording
 automatiq agent --target path/to/sess  # Builds an automation script from a specific recording
 ```
+
+### 3. Resume a previous agent session
+If you quit the agent mid-way (or it hit the step limit), `resume` picks up where you left off — all previous messages, cell outputs, and mode are restored from disk. Snapshots are saved incrementally, so you can resume even after a crash.
+```bash
+automatiq resume                 # Interactive picker (latest session pre-selected, Enter to resume)
+automatiq resume mysession       # Resume by name (skips picker if unique match)
+```
+
+> [!Note]
+> Resume requires the original recording folder to still be in your current directory (the agent reads from both the history snapshot and the recording workspace).
+
+## Sponsor
+
+<a href="https://go.nodemaven.com/automatiq">
+  <img align="right" src="https://raw.githubusercontent.com/StoneSteel27/AutomatiQ/main/assets/nodemaven_banner.png" alt="NodeMaven - High Quality Proxies" width="400">
+</a>
+
+Running web automation and scraping scripts reliably requires high-quality proxies to avoid rate limits, IP bans, and CAPTCHA blocks. [NodeMaven](https://go.nodemaven.com/automatiq) is our recommended provider.
+
+**Why NodeMaven?**
+- You get **99.9% uptime** with sticky sessions lasting up to 7 days.
+- All proxies have a **fraud score under 97%** while requiring **No KYC** for registration.
+- You can earn up to **10% cashback** on the data you use.
+
+🎁 **Special codes for AutomatiQ users:**
+- `AUTOMATIQ35` - **35% off** Mobile and Residential Proxies
+- `AUTOMATIQ40` - **40% off** ISP (Static) Proxies
+
+Maintaining this open-source project sustainably is made possible thanks to our sponsor, **NodeMaven**.
 
 ## Models & Custom Endpoints
 

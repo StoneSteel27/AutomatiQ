@@ -19,8 +19,9 @@ class AgentSandbox:
         self.bin_path = bin_path
         self.output_file = os.path.join(self.working_dir, ".sandbox_out.log")
         self.history, self.output_cache, self.cell_counter = [], {}, 0
+        self.progress_callback = None  # Optional[Callable[[int, int], None]] — (current, total)
 
-        logger.info(f"Initializing AgentSandbox in {self.working_dir} (Timeout: {self.timeout}s)")
+        logger.debug(f"Initializing AgentSandbox in {self.working_dir} (Timeout: {self.timeout}s)")
         os.makedirs(self.working_dir, exist_ok=True)
 
         self.command_queue = None
@@ -76,20 +77,25 @@ class AgentSandbox:
     def handle_magic_commands(self, code: str) -> str | None:
         cmd = code.strip()
         if cmd == "%reset":
-            logger.info("Executing %reset command")
+            logger.debug("Executing %reset command")
             self.history.clear()
             self.output_cache.clear()
             self.cell_counter = 0
             self.start_process()
             return "[System] Status: RESET SUCCESSFUL\nAll history, variables, and imports cleared."
         if cmd == "%restore":
-            logger.info("Executing %restore command")
+            logger.debug("Executing %restore command")
             if not self.history:
                 return "[System] Status: No history to restore."
             self.start_process()
-            for past_code in self.history:
+            self.cell_counter = 0
+            self.output_cache.clear()
+            total = len(self.history)
+            for i, past_code in enumerate(self.history):
                 self.execute(past_code, custom_timeout=999999, is_restore=True)
-            return f"[System] Status: RESTORED\nSuccessfully re-ran {len(self.history)} previous cells."
+                if self.progress_callback:
+                    self.progress_callback(i + 1, total)
+            return f"[System] Status: RESTORED\nSuccessfully re-ran {total} previous cells."
         if cmd.startswith("%view_output"):
             parts = cmd.split()
             if len(parts) < 2:
@@ -120,7 +126,7 @@ class AgentSandbox:
         cell_id = f"Cell_{self.cell_counter}"
         timeout = custom_timeout if custom_timeout is not None else self.timeout
 
-        logger.info(f"Executing {cell_id} (Timeout: {timeout}s)")
+        logger.debug(f"Executing {cell_id} (Timeout: {timeout}s)")
         if not is_restore:
             logger.debug(f"Code payload:\n{code}")
 
@@ -248,7 +254,7 @@ class AgentSandbox:
         interrupt_process(self.process, self.interrupt_event)
 
     def close(self) -> None:
-        logger.info("Closing AgentSandbox and cleaning up processes...")
+        logger.debug("Closing AgentSandbox and cleaning up processes...")
         self._closed = True
 
         # Stop execution loop if any

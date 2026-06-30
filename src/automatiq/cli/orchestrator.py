@@ -6,6 +6,7 @@ from rich.console import Group
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn
 from rich.spinner import Spinner
 from rich.text import Text
 
@@ -40,6 +41,16 @@ _text_buf: list[str] = []
 _total_generation_time = 0.0
 _generation_start = 0.0
 _session_tokens = 0
+
+# Restore progress
+_restore_progress = Progress(
+    TextColumn("[bold cyan]Restoring cells"),
+    BarColumn(),
+    TaskProgressColumn(),
+    TextColumn("{task.completed}/{task.total}"),
+    transient=False,
+)
+_restore_task_id = None
 
 # Phase: "streaming" (Live shows streamed content) | "tool_exec" (Live shows the run spinner).
 # Live is stopped explicitly between phases.
@@ -125,6 +136,8 @@ def _get_renderable():
     """
     if _phase == "streaming":
         return _build_stream_group()
+    if _restore_task_id is not None:
+        return _restore_progress
     return _run_spinner
 
 
@@ -192,7 +205,9 @@ def handle_agent_stream_end(sender, usage=None, **kwargs):
         _total_generation_time += time.monotonic() - _generation_start
         _generation_start = 0.0
     if usage is not None:
-        _session_tokens += getattr(usage, "completion_tokens", 0) or 0
+        pt = getattr(usage, "prompt_tokens", 0) or 0
+        ct = getattr(usage, "completion_tokens", 0) or 0
+        _session_tokens = pt + ct
     _stop_live()
     _flush_stream_to_console()
 
@@ -224,7 +239,19 @@ def handle_code_exec_output(sender, output, **kwargs):
 
 @events.code_exec_end.connect
 def handle_code_exec_end(sender, **kwargs):
+    global _restore_task_id
+    if _restore_task_id is not None:
+        _restore_progress.remove_task(_restore_task_id)
+        _restore_task_id = None
     _stop_live()
+
+
+@events.restore_progress.connect
+def handle_restore_progress(sender, current, total, **kwargs):
+    global _restore_task_id
+    if _restore_task_id is None:
+        _restore_task_id = _restore_progress.add_task("Restoring", total=total)
+    _restore_progress.update(_restore_task_id, completed=current)
 
 
 @events.llm_request_start.connect
@@ -258,10 +285,26 @@ def run_agent_cli(
     target: str | None = None,
     resume_from: str | None = None,
 ):
+    global _session_tokens
+
     if cancel_token is None:
         cancel_token = CancelToken()
     if stop_token is None:
         stop_token = StopToken()
+
+    # On resume, restore baseline token count from saved metadata
+    if resume_from:
+        from pathlib import Path
+
+        from ..core.history import load_session_metadata
+
+        saved_meta = load_session_metadata(Path(resume_from))
+        if saved_meta:
+            _session_tokens = saved_meta.get("total_tokens", 0) or 0
+        else:
+            _session_tokens = 0
+    else:
+        _session_tokens = 0
 
     input_queue = queue.Queue()
 
