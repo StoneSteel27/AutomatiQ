@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import uuid
+from urllib.parse import urlparse
 
 from zendriver import cdp
 
@@ -13,6 +14,8 @@ from .helpers import merge_headers
 
 logger = logging.getLogger(__name__)
 
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
 
 class _NetworkHandlers:
     """HTTP request/response/cookie handlers sharing BrowserAgent state via `self`."""
@@ -20,6 +23,12 @@ class _NetworkHandlers:
     async def request_handler_for_tab(self, event: cdp.network.RequestWillBeSent, session_id: str):
         if event.wall_time:
             self.ts_converter.calibrate(event.timestamp, event.wall_time)
+
+        # Skip the recorder's own ActionServer beacons (telemetry sendBeacon to
+        # 127.0.0.1) so they don't pollute the network log or stats.
+        parsed = urlparse(event.request.url)
+        if parsed.hostname in _LOOPBACK_HOSTS and parsed.path == "/act":
+            return
 
         if event.type_ in (
             cdp.network.ResourceType.DOCUMENT,
@@ -37,6 +46,21 @@ class _NetworkHandlers:
                 old_req["response_data"] = {"status": rd["status"], "headers": rd.get("headers", {}), "body": None}
             old_req["request_state"] = "redirected"
             old_req.pop("_meta", None)
+
+            if event.redirect_response:
+                # CDP reuses the same request_id for every redirect hop and only
+                # surfaces intermediate responses via RequestWillBeSent.redirect_response
+                # (no separate ResponseReceived/LoadingFinished fires for them). Without
+                # flushing here, the original request's method/url/post_data would be
+                # overwritten by the redirect target's GET — silently dropping auth
+                # POST bodies (e.g. ASP.NET WebForms logins). Persist the prior hop now
+                # before the new request_obj replaces it in active_map.
+                old_req["redirected"] = True
+                old_req["redirected_to_url"] = event.request.url
+                self._requests_file.write(json.dumps(old_req) + "\n")
+                self._requests_file.flush()
+                self.stats["completed"] += 1
+                self.active_map.pop(event.request_id, None)
 
         unique_id = f"{event.request_id}_{uuid.uuid4().hex[:8]}"
 

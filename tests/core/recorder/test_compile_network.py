@@ -27,6 +27,9 @@ def make_request_record(
     cookies_sent_details=None,
     response_headers=None,
     auth_header=None,
+    redirected=False,
+    redirected_to_url=None,
+    request_state="finished",
 ):
     """Build a synthetic request record matching the CDP handler JSONL schema."""
     if headers is None:
@@ -61,7 +64,9 @@ def make_request_record(
             "finished_unix": timestamp_unix + 2,
             "total_duration_ms": 2000.0,
         },
-        "request_state": "finished",
+        "request_state": request_state,
+        "redirected": redirected,
+        "redirected_to_url": redirected_to_url,
     }
 
 
@@ -291,3 +296,101 @@ class TestProcessNetworkRequests:
 
         assert transaction["metadata"]["security"]["has_authorization"] is True
         assert transaction["metadata"]["security"]["has_challenge"] is True
+
+    def test_redirect_chain_post_preserves_body(self, tmp_path):
+        """POST → 302 → GET → 200 produces two transaction folders.
+
+        The POST folder must keep its method/url/post_data (lost before the recorder
+        fix), mark itself as redirected, and write a req_payload file. The GET folder
+        must NOT carry the POST's body. Timeline events and stats must reflect both hops.
+        """
+        temp_data_dir = str(tmp_path / "data")
+        requests_dir = str(tmp_path / "requests")
+        output_dir = str(tmp_path / "session_dump")
+        for d in (temp_data_dir, requests_dir, output_dir):
+            os.makedirs(d, exist_ok=True)
+
+        login_body = "txtusername=alice&txtpassword=secret&btnlogin=Login"
+        landing_url = "https://arms.example.com/StudentPortal/Landing.aspx"
+
+        records = [
+            make_request_record(
+                request_id="REQ_LOGIN",
+                url="https://arms.example.com/",
+                method="POST",
+                status=302,
+                post_data=login_body,
+                response_headers={"Location": landing_url},
+                redirected=True,
+                redirected_to_url=landing_url,
+                request_state="redirected",
+                timestamp_unix=1700000000.0,
+            ),
+            make_request_record(
+                request_id="REQ_LOGIN",
+                url=landing_url,
+                method="GET",
+                status=200,
+                response_headers={"Content-Type": "text/html"},
+                timestamp_unix=1700000001.0,
+            ),
+        ]
+        write_jsonl(os.path.join(temp_data_dir, "requests.jsonl"), records)
+
+        timeline, _, stats = process_network_requests(
+            os.path.join(temp_data_dir, "requests.jsonl"), temp_data_dir, requests_dir, output_dir
+        )
+
+        # Two folders, sequential indices, named by method + domain
+        post_folder = "000_POST_arms.example.com"
+        get_folder = "001_GET_arms.example.com"
+        assert os.path.isdir(os.path.join(requests_dir, post_folder))
+        assert os.path.isdir(os.path.join(requests_dir, get_folder))
+
+        # POST transaction.json
+        with open(os.path.join(requests_dir, post_folder, "transaction.json")) as f:
+            post_tx = json.load(f)
+        assert post_tx["metadata"]["method"] == "POST"
+        assert post_tx["metadata"]["url"] == "https://arms.example.com/"
+        assert post_tx["metadata"]["status"] == 302
+        assert post_tx["metadata"]["redirected"] is True
+        assert post_tx["metadata"]["redirected_to_url"] == landing_url
+        assert post_tx["request"]["has_payload"] is True
+        assert post_tx["response"]["headers"]["Location"] == landing_url
+
+        # POST req_payload was written
+        payload_files = [f for f in os.listdir(os.path.join(requests_dir, post_folder)) if f.startswith("req_payload.")]
+        assert len(payload_files) == 1
+        with open(os.path.join(requests_dir, post_folder, payload_files[0])) as f:
+            assert f.read() == login_body
+
+        # GET transaction.json — must NOT carry the POST's body / redirect flag
+        with open(os.path.join(requests_dir, get_folder, "transaction.json")) as f:
+            get_tx = json.load(f)
+        assert get_tx["metadata"]["method"] == "GET"
+        assert get_tx["metadata"]["url"] == landing_url
+        assert get_tx["metadata"]["status"] == 200
+        assert get_tx["metadata"]["redirected"] is False
+        assert get_tx["metadata"]["redirected_to_url"] is None
+        assert get_tx["request"]["has_payload"] is False
+
+        # GET must not have a req_payload file
+        get_files = os.listdir(os.path.join(requests_dir, get_folder))
+        assert not any(f.startswith("req_payload.") for f in get_files)
+
+        # Timeline reflects both hops + redirect marker on the first
+        assert len(timeline) == 2
+        assert timeline[0]["method"] == "POST"
+        assert timeline[0]["status"] == 302
+        assert timeline[0]["redirected"] is True
+        assert timeline[0]["redirected_to_url"] == landing_url
+        assert timeline[1]["method"] == "GET"
+        assert timeline[1]["status"] == 200
+        assert timeline[1]["redirected"] is False
+        assert timeline[1]["redirected_to_url"] is None
+
+        # Stats reconcile across both hops
+        assert stats["methods"]["POST"] == 1
+        assert stats["methods"]["GET"] == 1
+        assert stats["status_codes"]["302"] == 1
+        assert stats["status_codes"]["200"] == 1

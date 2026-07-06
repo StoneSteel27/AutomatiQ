@@ -14,8 +14,7 @@ import asyncio
 import json
 import os
 
-from zendriver.cdp.network import Headers, ResourceType, Response
-from zendriver.cdp.security import SecurityState
+from zendriver.cdp.network import ResourceType
 
 from .conftest import (
     make_action_payload,
@@ -24,6 +23,7 @@ from .conftest import (
     make_data_received_event,
     make_loading_failed_event,
     make_loading_finished_event,
+    make_redirect_response,
     make_req_extra_info_event,
     make_request_event,
     make_res_extra_info_event,
@@ -148,20 +148,19 @@ class TestHttpRequestHandlers:
         assert req["response_data"]["headers"]["X-Response-Extra"] == "yes"
 
     def test_redirect_response_populated(self, agent):
-        """RequestWillBeSent with redirect_response on existing request updates the old
-        request and creates a new one in active_map."""
+        """RequestWillBeSent with redirect_response on existing request flushes the
+        prior hop to requests.jsonl (preserving its method/url + the 3xx response)
+        and creates a new pending entry in active_map for the redirect target.
 
-        redirect_resp = Response(
+        Regression guard for the bug where ASP.NET WebForms login POSTs were
+        overwritten by their 302-redirect target — losing the POST method/url/body.
+        """
+
+        redirect_resp = make_redirect_response(
             url="https://example.com/old",
             status=301,
             status_text="Moved Permanently",
-            headers=Headers({"Location": "https://example.com/new"}),
-            mime_type="text/plain",
-            charset="utf-8",
-            connection_reused=False,
-            connection_id=1.0,
-            encoded_data_length=50.0,
-            security_state=SecurityState.SECURE,
+            headers={"Location": "https://example.com/new"},
         )
 
         async def feed():
@@ -183,6 +182,109 @@ class TestHttpRequestHandlers:
         assert "REQ_001" in agent.active_map
         assert agent.active_map["REQ_001"]["url"] == "https://example.com/new"
         assert agent.active_map["REQ_001"]["request_state"] == "pending"
+
+        # Prior hop must have been flushed to disk before being overwritten
+        flushed = read_jsonl(os.path.join(agent._data_dir.name, "requests.jsonl"))
+        assert len(flushed) == 1
+        old = flushed[0]
+        assert old["url"] == "https://example.com/old"
+        assert old["request_state"] == "redirected"
+        assert old["redirected"] is True
+        assert old["redirected_to_url"] == "https://example.com/new"
+        assert old["response_data"]["status"] == 301
+        assert old["response_data"]["headers"]["Location"] == "https://example.com/new"
+        # Stats reflect the flushed redirect hop (no LoadingFinished fires for it)
+        assert agent.stats["completed"] == 1
+
+    def test_redirect_preserves_post_body(self, agent):
+        """Realistic login: POST / with form body -> 302 -> GET /Landing -> 200.
+
+        Both hops must end up in requests.jsonl, sharing request_id but with
+        different unique_ids. The POST's method/url/post_data must survive intact;
+        the GET must carry the 200 response and must NOT inherit the POST's body
+        or method (the bug that broke ASP.NET WebForms login reverse-engineering).
+        """
+        login_body = "txtusername=alice&txtpassword=secret&btnlogin=Login"
+        redirect_resp = make_redirect_response(
+            url="https://arms.example.com/",
+            status=302,
+            headers={"Location": "https://arms.example.com/StudentPortal/Landing.aspx"},
+        )
+
+        async def feed():
+            # Hop 1: POST / with credentials
+            await agent.request_handler_for_tab(
+                make_request_event(
+                    request_id="REQ_LOGIN",
+                    url="https://arms.example.com/",
+                    method="POST",
+                    post_data=login_body,
+                    resource_type=ResourceType.DOCUMENT,
+                ),
+                SESSION_ID,
+            )
+            # Hop 2: GET /Landing.aspx (CDP reuses request_id, redirect carries 302)
+            await agent.request_handler_for_tab(
+                make_request_event(
+                    request_id="REQ_LOGIN",
+                    url="https://arms.example.com/StudentPortal/Landing.aspx",
+                    method="GET",
+                    resource_type=ResourceType.DOCUMENT,
+                    redirect_response=redirect_resp,
+                ),
+                SESSION_ID,
+            )
+            # ResponseReceived + LoadingFinished fire only for the FINAL hop
+            await agent.response_handler_for_tab(
+                make_response_event(
+                    request_id="REQ_LOGIN",
+                    status=200,
+                    url="https://arms.example.com/StudentPortal/Landing.aspx",
+                    resource_type=ResourceType.DOCUMENT,
+                ),
+                SESSION_ID,
+            )
+            await agent.loading_finished_handler_for_tab(
+                make_loading_finished_event(request_id="REQ_LOGIN"),
+                SESSION_ID,
+            )
+
+        asyncio.run(feed())
+
+        requests = read_jsonl(os.path.join(agent._data_dir.name, "requests.jsonl"))
+        assert len(requests) == 2
+
+        # Record 0: the flushed POST -> 302
+        post = requests[0]
+        assert post["request_id"] == "REQ_LOGIN"
+        assert post["method"] == "POST"
+        assert post["url"] == "https://arms.example.com/"
+        assert post["post_data"] == login_body
+        assert post["request_state"] == "redirected"
+        assert post["redirected"] is True
+        assert post["redirected_to_url"] == "https://arms.example.com/StudentPortal/Landing.aspx"
+        assert post["response_data"]["status"] == 302
+        assert post["response_data"]["headers"]["Location"] == "https://arms.example.com/StudentPortal/Landing.aspx"
+
+        # Record 1: the final GET -> 200
+        get = requests[1]
+        assert get["request_id"] == "REQ_LOGIN"
+        assert get["method"] == "GET"
+        assert get["url"] == "https://arms.example.com/StudentPortal/Landing.aspx"
+        assert get["post_data"] is None
+        assert get["request_state"] == "finished"
+        assert not get.get("redirected", False)
+        assert get["response_data"]["status"] == 200
+
+        # unique_ids must differ so downstream consumers can distinguish hops
+        assert post["unique_id"] != get["unique_id"]
+        assert post["unique_id"].startswith("REQ_LOGIN_")
+        assert get["unique_id"].startswith("REQ_LOGIN_")
+
+        # Stats: total_requests counts every RequestWillBeSent (2); completed
+        # counts the flushed 302 hop + the final LoadingFinished (2).
+        assert agent.stats["total_requests"] == 2
+        assert agent.stats["completed"] == 2
 
     def test_blocklist_skips_blocked_url(self, agent):
         """Blocked URLs are not added to active_map and increment blocklist stats."""

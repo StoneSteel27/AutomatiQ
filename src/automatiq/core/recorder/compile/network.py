@@ -83,6 +83,8 @@ def process_network_requests(
                         "method": item.get("method"),
                         "url": item.get("url"),
                         "status": res_data.get("status"),
+                        "redirected": bool(item.get("redirected")),
+                        "redirected_to_url": item.get("redirected_to_url"),
                         "timing": {
                             "request_sent_unix": item.get("timestamp_unix"),
                             "response_received_unix": item.get("response_timing", {}).get("received_unix"),
@@ -157,6 +159,8 @@ def process_network_requests(
                         "url": item.get("url"),
                         "status": res_data.get("status", -1),
                         "folder": f"requests/{folder_name}",
+                        "redirected": bool(item.get("redirected")),
+                        "redirected_to_url": item.get("redirected_to_url"),
                     }
                 )
 

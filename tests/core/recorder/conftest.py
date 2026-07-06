@@ -154,6 +154,35 @@ def make_request_event(
     )
 
 
+def make_redirect_response(
+    url="https://example.com/old",
+    status=302,
+    status_text="Found",
+    headers=None,
+    mime_type="text/plain",
+    charset="utf-8",
+):
+    """Build a real zendriver `Response` suitable for `RequestWillBeSent.redirect_response`.
+
+    Defaults to a 302 with a `Location` header pointing at `https://example.com/new`,
+    mirroring how Chrome surfaces intermediate redirect responses via CDP.
+    """
+    if headers is None:
+        headers = {"Location": "https://example.com/new"}
+    return Response(
+        url=url,
+        status=status,
+        status_text=status_text,
+        headers=Headers(headers),
+        mime_type=mime_type,
+        charset=charset,
+        connection_reused=False,
+        connection_id=1.0,
+        encoded_data_length=50.0,
+        security_state=SecurityState.SECURE,
+    )
+
+
 def make_response_event(
     request_id="REQ_001",
     status=200,
