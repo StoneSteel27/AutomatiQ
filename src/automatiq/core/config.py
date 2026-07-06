@@ -21,6 +21,7 @@ VERSION = "0.2.2"
 # Stores binaries, logs, history, and user preferences across sessions.
 HOME_DIR = Path.home() / ".automatiq"
 BIN_DIR = HOME_DIR / "bin"
+BROWSERS_DIR = HOME_DIR / "browsers"
 LOGS_DIR = HOME_DIR / "logs"
 HISTORY_DIR = HOME_DIR / "history"
 CONFIG_FILE = HOME_DIR / "config.toml"
@@ -65,10 +66,16 @@ MERGE_GAP_THRESHOLD_SECONDS = 1.5
 MAX_FRAMES_PER_PROMPT = 8
 
 # ── Blocklist sources ────────────────────────────────────────────────────────
-BLOCKLIST_SOURCES = {
-    "stevenblack": "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
-    "adaway": "https://raw.githubusercontent.com/AdAway/adaway.github.io/master/hosts.txt",
-}
+BLOCKLIST_SOURCES = {}
+
+# ── Browser ──────────────────────────────────────────────────────────────────
+BROWSER_TYPE = "brave"  # "chrome", "brave", or "auto" — passed to zendriver Config
+# Brave release channel to use when downloading a managed portable copy.
+# Options: "release", "beta", "nightly".
+BROWSER_CHANNEL = "release"
+# Optional explicit path to a browser executable. When set, this overrides both
+# zendriver's autodetect and the managed BROWSERS_DIR cache.
+BROWSER_EXECUTABLE_PATH = None
 
 # ── Agent tunables ───────────────────────────────────────────────────────────
 MAX_AGENT_STEPS = 100
@@ -88,6 +95,25 @@ _DEFAULT_CONFIG_TOML = """\
 #
 # Values here override the built-in defaults.
 # CLI flags (--model, --max-steps, etc.) override everything.
+
+[browser]
+# Which browser to use for recording. Options: chrome, brave, auto.
+# "auto" auto-detects from installed browsers (Chrome preferred).
+#
+# Brave is the default because it ships built-in anti-fingerprinting and
+# anti-tracking protections that help keep the recorder stealthy against
+# websites. If Brave isn't found, AutomatiQ will offer to download a
+# portable copy; declining falls back to whatever Chrome is installed.
+type = "brave"
+
+# Brave release channel for the managed portable download.
+# Options: release, beta, nightly. Only used when type = "brave".
+channel = "release"
+
+# Optional explicit path to a browser executable. When set, this overrides
+# both zendriver's autodetect and the managed ~/.automatiq/browsers cache.
+# Example: "C:/Users/me/browsers/brave-v1.92.134/brave.exe"
+# executable_path = ""
 
 [models]
 # LiteLLM model string for the investigator agent.
@@ -181,6 +207,7 @@ def _load_config_toml():
     global MAX_AGENT_STEPS, SANDBOX_TIMEOUT_SECONDS
     global FPS, SEGMENT_PAD_SECONDS, MERGE_GAP_THRESHOLD_SECONDS, MAX_FRAMES_PER_PROMPT
     global BANNER_ENABLED, BANNER_SPEED
+    global BROWSER_TYPE, BROWSER_CHANNEL, BROWSER_EXECUTABLE_PATH
     global OUTPUT_DIR, WORKSPACE_DIR, BLOCKLIST_DIR, BLOCKLIST_DB
 
     if not CONFIG_FILE.exists():
@@ -214,6 +241,15 @@ def _load_config_toml():
         RECORDER_PROXY_SERVER = str(proxy["server"]) or None
     if "provider" in proxy:
         RECORDER_PROXY_PROVIDER = str(proxy["provider"]) or None
+
+    # [browser]
+    browser = data.get("browser", {})
+    if "type" in browser:
+        BROWSER_TYPE = str(browser["type"])
+    if "channel" in browser:
+        BROWSER_CHANNEL = str(browser["channel"])
+    if "executable_path" in browser:
+        BROWSER_EXECUTABLE_PATH = str(browser["executable_path"]) or None
 
     # [agent]
     agent = data.get("agent", {})
@@ -253,7 +289,7 @@ _load_config_toml()
 
 
 def ensure_system_dirs():
-    for d in (HOME_DIR, BIN_DIR, LOGS_DIR, HISTORY_DIR):
+    for d in (HOME_DIR, BIN_DIR, BROWSERS_DIR, LOGS_DIR, HISTORY_DIR):
         d.mkdir(parents=True, exist_ok=True)
 
 

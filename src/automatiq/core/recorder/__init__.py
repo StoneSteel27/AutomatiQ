@@ -87,12 +87,19 @@ def run_recording(
     skip_callback=None,
     proxy: str | None = None,
     no_proxy: bool = False,
+    browser_resolution: tuple[str, object | None, str] | None = None,
 ) -> bool:
     """Run the full recording pipeline: browser -> video -> compile workspace.
 
     1. Launches Chrome with CDP instrumentation and screen capture.
     2. User browses freely; Ctrl+C stops the session.
     3. Compiles the captured data into output/workspace/session_dump/.
+
+    ``browser_resolution`` is optionally produced by the CLI via
+    ``browser_manager.resolve_browser_for_recording`` and forwarded to
+    ``BrowserAgent.run_session`` so that a downloaded Brave or Chrome fallback
+    is used instead of zendriver's default autodetect. When None, the legacy
+    behaviour (``browser=config.BROWSER_TYPE``) is preserved.
     """
 
     if not config.WORKSPACE_DIR.exists():
@@ -124,7 +131,13 @@ def run_recording(
             "[green]Recording Active 🔴[/green] Press [blue]Ctrl+C[/blue] to stop and save recording\n",
             spinner="earth",
         ):
-            temp_data_dir = asyncio.run(_browser_agent.run_session(url=url, stop_token=stop_token))
+            temp_data_dir = asyncio.run(
+                _browser_agent.run_session(
+                    url=url,
+                    stop_token=stop_token,
+                    browser_resolution=browser_resolution,
+                )
+            )
 
     except KeyboardInterrupt:
         events.log_warn.send("recorder", text="KeyboardInterrupt caught in run_recording.")
