@@ -17,7 +17,7 @@ from automatiq.cli import console as cli_console
 from automatiq.core.recorder.compile.workspace import compile_workspace, verify_timeline_files
 
 from .conftest import (
-    make_binding_event,
+    make_action_payload,
     make_data_received_event,
     make_loading_finished_event,
     make_request_event,
@@ -52,9 +52,7 @@ def feed_full_session(agent):
         await agent.websocket_closed_handler_for_tab(make_ws_closed_event(), SESSION_ID)
 
         # User action
-        await agent.binding_handler_for_tab(
-            make_binding_event(payload=json.dumps({"type": "click", "text": "Submit"})), SESSION_ID
-        )
+        agent._process_action(make_action_payload("click", text="Submit"))
 
     asyncio.run(feed())
 
@@ -131,15 +129,9 @@ class TestCompileWorkspaceFullPipeline:
     def test_actions_only_session(self, agent, workspace_config):
         """Session with only user actions (no requests, no WS) produces a valid workspace."""
 
-        async def feed():
-            await agent.binding_handler_for_tab(
-                make_binding_event(payload=json.dumps({"type": "click", "text": "Login"})), SESSION_ID
-            )
-            await agent.binding_handler_for_tab(
-                make_binding_event(payload=json.dumps({"type": "keypress", "key": "Enter"})), SESSION_ID
-            )
+        agent._process_action(make_action_payload("click", text="Login"))
+        agent._process_action(make_action_payload("keypress", key="Enter"))
 
-        asyncio.run(feed())
         temp_data_dir = asyncio.run(agent._cleanup_and_build_report())
 
         _, success = compile_workspace(

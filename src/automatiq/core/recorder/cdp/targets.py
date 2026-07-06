@@ -1,4 +1,4 @@
-"""CDP target/tab management and JS-binding dispatch — a mixin for BrowserAgent."""
+"""CDP target/tab management and action ingestion — a mixin for BrowserAgent."""
 
 import asyncio
 import json
@@ -13,54 +13,58 @@ logger = logging.getLogger(__name__)
 
 
 class _TargetManager:
-    """Tab/iframe attach, JS-binding dispatch, and handler wiring via `self`."""
+    """Tab attach, network-handler wiring, and action ingestion via `self`."""
 
-    async def binding_handler_for_tab(self, event: cdp.runtime.BindingCalled, session_id: str):
-        if event.name == "sendActionToPython":
-            try:
-                payload = json.loads(event.payload)
-                action_type = payload.get("type")
-                is_iframe = payload.get("is_iframe", False)
+    def _process_action(self, payload: dict) -> None:
+        """Ingest a telemetry action payload from the ActionServer (or tests).
 
-                payload["timestamp_iso"] = self.ts_converter.current_iso8601()
-                payload["timestamp_unix"] = time.time()
-                payload["execution_context_id"] = event.execution_context_id
-                payload["_session_id"] = session_id
+        Replaces the old CDP ``Runtime.addBinding`` path so the ``Runtime``
+        domain no longer needs to be enabled. Called from the ActionServer
+        thread; writes are guarded by ``self._actions_lock``.
+        """
+        try:
+            action_type = payload.get("type")
+            is_iframe = payload.get("is_iframe", False)
 
-                # We drop script_loaded logs to reduce console spam, but we DO NOT drop
-                # iframe actions like 'click' or 'keypress'. We keep them.
-                if action_type == "script_loaded":
-                    # Only log the main tab init once, or optionally drop it entirely.
-                    if not is_iframe:
-                        events.log_info.send(
-                            "recorder", text="[ACTION] script_loaded: Telemetry script initialized (Main Tab)"
-                        )
-                    return
+            payload["timestamp_iso"] = self.ts_converter.current_iso8601()
+            payload["timestamp_unix"] = time.time()
 
-                # Stream to disk instead of memory
+            # We drop script_loaded logs to reduce console spam, but we DO NOT drop
+            # iframe actions like 'click' or 'keypress'. We keep them.
+            if action_type == "script_loaded":
+                # Only log the main tab init once, or optionally drop it entirely.
+                if not is_iframe:
+                    events.log_info.send(
+                        "recorder", text="[ACTION] script_loaded: Telemetry script initialized (Main Tab)"
+                    )
+                return
+
+            # Stream to disk instead of memory
+            with self._actions_lock:
                 self._actions_file.write(json.dumps(payload) + "\n")
                 self._actions_file.flush()
                 self._actions_count += 1
 
-                tag = " (IFRAME)" if is_iframe else ""
+            tag = " (IFRAME)" if is_iframe else ""
 
-                if action_type == "keypress":
-                    events.log_info.send("recorder", text=f"[ACTION] keypress{tag}: {payload.get('key')}")
-                elif action_type == "click":
-                    events.log_info.send("recorder", text=f"[ACTION] click{tag}: {payload.get('text', '')[:50]}")
-                else:
-                    fallback_val = payload.get("value", payload.get("newUrl", payload.get("text", "")))
-                    events.log_info.send("recorder", text=f"[ACTION] {action_type}{tag}: {fallback_val[:50]}")
-            except Exception as e:
-                events.log_error.send("recorder", text=f"Binding handler failed: {e}")
-                events.log_traceback.send("recorder")
+            if action_type == "keypress":
+                events.log_info.send("recorder", text=f"[ACTION] keypress{tag}: {payload.get('key')}")
+            elif action_type == "click":
+                events.log_info.send("recorder", text=f"[ACTION] click{tag}: {payload.get('text', '')[:50]}")
+            else:
+                fallback_val = payload.get("value", payload.get("newUrl", payload.get("text", "")))
+                events.log_info.send("recorder", text=f"[ACTION] {action_type}{tag}: {fallback_val[:50]}")
+        except Exception as e:
+            events.log_error.send("recorder", text=f"Action processing failed: {e}")
+            events.log_traceback.send("recorder")
 
     def _attach_handlers_to_tab(self, tab_session, session_id, is_iframe=False):
-        async def on_binding(e):
-            await self.binding_handler_for_tab(e, session_id)
+        """Wire CDP network/WebSocket handlers for a tab session.
 
-        tab_session.add_handler(cdp.runtime.BindingCalled, on_binding)
-
+        Only network-domain handlers are attached — telemetry/visuals injection
+        is handled by the Chrome extension's content scripts on every frame, so
+        no Runtime/Page domain calls are made here (stealth).
+        """
         if not is_iframe:
 
             async def on_request(e):
@@ -118,105 +122,99 @@ class _TargetManager:
             tab_session.add_handler(cdp.network.WebSocketWillSendHandshakeRequest, on_ws_handshake_req)
             tab_session.add_handler(cdp.network.WebSocketHandshakeResponseReceived, on_ws_handshake_res)
 
-    async def target_created_handler(self, event: cdp.target.AttachedToTarget):
+    async def target_created_handler(self, event: cdp.target.TargetCreated):
+        """Attach CDP network capture + anti-debugger protection to a new tab/popup.
+
+        We use ``TargetCreated`` (from ``set_discover_targets``) instead of
+        ``AttachedToTarget`` (from ``set_auto_attach``).  Chrome requires
+        ``flatten=True`` for browser-level auto-attach, but flatten creates a
+        competing flattened sub-session that intercepts ``Debugger.Paused``
+        events on the browser-level websocket — our per-tab handler (on the
+        tab's own websocket) never sees them, so anti-debugger traps hang the
+        tab.
+
+        With ``TargetCreated`` + no auto-attach, the tab's own websocket is the
+        ONLY CDP session for that target.  ``Debugger.Paused`` events go there
+        and our auto-resume handler catches them.
+
+          - ``Debugger.enable()`` + ``setSkipAllPauses(True)`` — makes ``debugger;``
+            a ~0ms no-op so timing tripwires fail.
+          - ``Debugger.Paused`` auto-resume handler — defence-in-depth for any
+            pause that slips through (includes ``reason="other"`` for
+            ``eval("debugger")`` via ``document.write``).
+          - ``Network.enable()`` + wire all network/WS handlers.
+
+        The small race window (scripts could run before setup completes) is not
+        a problem in practice — ``chrome://newtab/`` (the default new tab) has no
+        anti-debugger traps, and by the time the user navigates to a real site,
+        the handler is already armed.
+        """
         target_info = event.target_info
 
-        if target_info.type_ == "page":
-            events.log_info.send("recorder", text=f"New Tab/Window Opened: {target_info.url}")
+        if target_info.type_ != "page":
+            return
 
-            # Low-latency rapid polling for the newly created tab session object.
-            # Avoids a fixed 500ms blind window where critical network events might be lost.
-            tab_session = None
-            for _ in range(100):  # max 1.0s wait
-                for t in self.browser.targets:
-                    if (
-                        getattr(t, "session_id", None) == event.session_id
-                        or getattr(t, "target_id", None) == target_info.target_id
-                    ):
-                        tab_session = t
-                        break
-                if tab_session:
-                    break
-                await asyncio.sleep(0.01)
+        target_id = target_info.target_id
 
-            if not tab_session:
-                events.log_warn.send("recorder", text=f"Could not resolve Tab object for session {event.session_id}")
+        # Skip the main tab (already registered in browser_agent.run_session).
+        # TargetCreated fires for existing targets when set_discover_targets is
+        # called, so the main tab is re-announced here.
+        for existing in self.tabs.values():
+            if getattr(existing.get("tab"), "target_id", None) == target_id:
                 return
 
-            self.tabs[event.session_id] = {"tab": tab_session, "type": "page", "url": target_info.url}
-            events.log_debug.send("recorder", text=f"Successfully bound CDP to new tab: {target_info.target_id}")
+        events.log_info.send("recorder", text=f"New Tab/Window Opened: {target_info.url}")
 
-            try:
-                # Prioritize network domain to catch immediate websocket handshakes and HTTP requests
-                await tab_session.send(
-                    cdp.network.enable(
-                        max_resource_buffer_size=100 * 1024 * 1024, max_total_buffer_size=1000 * 1024 * 1024
-                    )
-                )
-                await tab_session.send(cdp.page.enable())
-                await tab_session.send(cdp.page.set_bypass_csp(enabled=True))
+        # The Tab is created by zendriver's internal TargetCreated handler.
+        # Yield once so it can append to self.browser.targets before we scan.
+        await asyncio.sleep(0)
 
-                await tab_session.send(cdp.runtime.enable())
-                await tab_session.send(cdp.runtime.add_binding(name="sendActionToPython"))
+        tab_session = next(
+            (t for t in self.browser.targets if getattr(t, "target_id", None) == target_id),
+            None,
+        )
 
-                self._attach_handlers_to_tab(tab_session, event.session_id, is_iframe=False)
+        # Fallback poll: max 1s (200 x 5ms) for slow targets like chrome://newtab/.
+        for _ in range(200):
+            if tab_session:
+                break
+            await asyncio.sleep(0.005)
+            tab_session = next(
+                (t for t in self.browser.targets if getattr(t, "target_id", None) == target_id),
+                None,
+            )
 
-                await tab_session.send(
-                    cdp.page.add_script_to_evaluate_on_new_document(source=self.telemetry_script, run_immediately=True)
-                )
-                await tab_session.send(
-                    cdp.page.add_script_to_evaluate_on_new_document(source=self.visuals_script, run_immediately=True)
-                )
+        if not tab_session:
+            events.log_warn.send("recorder", text=f"Could not resolve Tab object for target {target_id}")
+            return
 
-                await tab_session.send(cdp.runtime.evaluate(expression=self.telemetry_script))
-                await tab_session.send(cdp.runtime.evaluate(expression=self.visuals_script))
+        # Key by target_id (no session_id available from TargetCreated).
+        self.tabs[str(target_id)] = {"tab": tab_session, "type": "page", "url": target_info.url}
+        events.log_debug.send("recorder", text=f"Successfully bound CDP to new tab: {target_id}")
 
-            except Exception as exc:
-                events.log_error.send("recorder", text=f"Failed to init CDP on new tab {target_info.target_id}: {exc}")
-                events.log_traceback.send("recorder")
+        try:
+            # Anti-debugger protection: enable Debugger domain and set
+            # setSkipAllPauses(True) so V8 skips pauses entirely — debugger;
+            # becomes a true no-op in ~0ms, so timing tripwires fail.
+            # The Debugger.Paused auto-resume handler is defence-in-depth;
+            # "other" is included because eval("debugger") via document.write
+            # pauses with reason="other".
+            await tab_session.send(cdp.debugger.enable())
+            await tab_session.send(cdp.debugger.set_skip_all_pauses(skip=True))
 
-        elif target_info.type_ == "iframe":
-            # We ONLY want JS actions from iframes (clicks inside Stripe gateways, etc.)
-            # We explicitly do NOT track network requests for iframes because they are
-            # already captured by the main 'page' network domain.
+            async def _on_debugger_paused(paused_event: cdp.debugger.Paused):
+                if paused_event.reason in ("debuggerStatement", "ambiguous", "assert", "other"):
+                    await tab_session.send(cdp.debugger.resume())
 
-            if self.blocklist and self.blocklist.is_blocked_url(target_info.url):
-                return
+            tab_session.add_handler(cdp.debugger.Paused, _on_debugger_paused)
 
-            tab_session = None
-            for _ in range(100):  # max 1.0s wait
-                for t in self.browser.targets:
-                    if (
-                        getattr(t, "session_id", None) == event.session_id
-                        or getattr(t, "target_id", None) == target_info.target_id
-                    ):
-                        tab_session = t
-                        break
-                if tab_session:
-                    break
-                await asyncio.sleep(0.01)
+            # Network domain — catch HTTP requests and WebSocket handshakes.
+            await tab_session.send(
+                cdp.network.enable(max_resource_buffer_size=100 * 1024 * 1024, max_total_buffer_size=1000 * 1024 * 1024)
+            )
+            self._attach_handlers_to_tab(tab_session, str(target_id), is_iframe=False)
 
-            if not tab_session:
-                return
-
-            self.tabs[event.session_id] = {"tab": tab_session, "type": "iframe", "url": target_info.url}
-
-            try:
-                # Enable Runtime so we can add the binding to receive JS messages
-                await tab_session.send(cdp.runtime.enable())
-                await tab_session.send(cdp.runtime.add_binding(name="sendActionToPython"))
-
-                self._attach_handlers_to_tab(tab_session, event.session_id, is_iframe=True)
-
-                # Enable Page domain just enough to inject the script
-                await tab_session.send(cdp.page.enable())
-                await tab_session.send(
-                    cdp.page.add_script_to_evaluate_on_new_document(source=self.telemetry_script, run_immediately=True)
-                )
-
-                # Evaluate immediately in case the iframe is already loaded
-                await tab_session.send(cdp.runtime.evaluate(expression=self.telemetry_script))
-            except Exception as e:
-                # Iframes get destroyed quickly. We log to see if it's the real crash source.
-                events.log_error.send("recorder", text=f"IFrame CDP initialization failed: {e}")
-                events.log_traceback.send("recorder")
+            events.log_debug.send("recorder", text=f"[DEBUGGER] New tab fully initialized: {target_id}")
+        except Exception as exc:
+            events.log_error.send("recorder", text=f"Failed to init CDP on new tab {target_id}: {exc}")
+            events.log_traceback.send("recorder")

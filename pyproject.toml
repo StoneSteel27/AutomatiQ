@@ -72,7 +72,7 @@ where = ["src"]
 include = ["automatiq*"]
 
 [tool.setuptools.package-data]
-"automatiq" = ["cli/data/*.json", "core/recorder/js/*.js"]
+"automatiq" = ["cli/data/*.json", "core/recorder/extension/*"]
 
 [tool.ruff]
 line-length = 121

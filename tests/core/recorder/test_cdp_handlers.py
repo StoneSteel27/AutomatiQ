@@ -18,8 +18,8 @@ from zendriver.cdp.network import Headers, ResourceType, Response
 from zendriver.cdp.security import SecurityState
 
 from .conftest import (
+    make_action_payload,
     make_associated_cookie,
-    make_binding_event,
     make_cookie,
     make_data_received_event,
     make_loading_failed_event,
@@ -368,12 +368,11 @@ class TestWebsocketHandlers:
 # ── Action handler tests ──────────────────────────────────────────────────────
 
 
-class TestBindingHandler:
+class TestActionProcessing:
     def test_click_action_written_to_jsonl(self, agent):
-        """BindingCalled with a click payload writes to actions.jsonl."""
+        """Action payload from the extension writes to actions.jsonl."""
 
-        event = make_binding_event(payload=json.dumps({"type": "click", "text": "Submit", "url": "https://example.com"}))
-        asyncio.run(agent.binding_handler_for_tab(event, SESSION_ID))
+        agent._process_action(make_action_payload("click", text="Submit", url="https://example.com"))
 
         actions = read_jsonl(os.path.join(agent._data_dir.name, "actions.jsonl"))
         assert len(actions) == 1
@@ -382,14 +381,12 @@ class TestBindingHandler:
         assert action["text"] == "Submit"
         assert "timestamp_iso" in action
         assert "timestamp_unix" in action
-        assert action["execution_context_id"] == 1
         assert agent._actions_count == 1
 
     def test_script_loaded_dropped(self, agent):
-        """BindingCalled with script_loaded type is NOT written to actions.jsonl."""
+        """script_loaded actions are NOT written to actions.jsonl."""
 
-        event = make_binding_event(payload=json.dumps({"type": "script_loaded"}))
-        asyncio.run(agent.binding_handler_for_tab(event, SESSION_ID))
+        agent._process_action(make_action_payload("script_loaded"))
 
         actions_path = os.path.join(agent._data_dir.name, "actions.jsonl")
         if os.path.exists(actions_path):
@@ -397,10 +394,9 @@ class TestBindingHandler:
         assert agent._actions_count == 0
 
     def test_keypress_action_written(self, agent):
-        """BindingCalled with a keypress payload writes to actions.jsonl."""
+        """Keypress payload writes to actions.jsonl."""
 
-        event = make_binding_event(payload=json.dumps({"type": "keypress", "key": "Enter"}))
-        asyncio.run(agent.binding_handler_for_tab(event, SESSION_ID))
+        agent._process_action(make_action_payload("keypress", key="Enter"))
 
         actions = read_jsonl(os.path.join(agent._data_dir.name, "actions.jsonl"))
         assert len(actions) == 1
@@ -410,23 +406,11 @@ class TestBindingHandler:
     def test_iframe_action_written(self, agent):
         """Actions with is_iframe=True are still written (not dropped)."""
 
-        event = make_binding_event(payload=json.dumps({"type": "click", "text": "Pay", "is_iframe": True}))
-        asyncio.run(agent.binding_handler_for_tab(event, SESSION_ID))
+        agent._process_action(make_action_payload("click", text="Pay", is_iframe=True))
 
         actions = read_jsonl(os.path.join(agent._data_dir.name, "actions.jsonl"))
         assert len(actions) == 1
         assert actions[0]["is_iframe"] is True
-
-    def test_non_sendaction_binding_ignored(self, agent):
-        """BindingCalled with a different binding name is ignored."""
-
-        event = make_binding_event(name="otherBinding", payload='{"type": "click"}')
-        asyncio.run(agent.binding_handler_for_tab(event, SESSION_ID))
-
-        actions_path = os.path.join(agent._data_dir.name, "actions.jsonl")
-        if os.path.exists(actions_path):
-            assert len(read_jsonl(actions_path)) == 0
-        assert agent._actions_count == 0
 
 
 # ── Cleanup test ──────────────────────────────────────────────────────────────

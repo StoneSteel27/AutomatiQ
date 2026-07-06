@@ -6,15 +6,37 @@
     if (window._automatiqTelemetryLoaded) return;
     window._automatiqTelemetryLoaded = true;
 
+    const _originalConsole = { ...console };
+    for (const key in console) {
+        if (typeof console[key] === "function") {
+            console[key] = function (...args) {
+                for (const arg of args) {
+                    if (arg instanceof Error) return;
+                }
+                return _originalConsole[key].apply(this, args);
+            };
+        }
+    }
+
     const isIframe = window !== window.top;
 
-    // Helper to send data to Zendriver/Python Backend
+    // Relay telemetry to the Python ActionServer via the extension's
+    // background service worker. A content script shares the *page's* origin
+    // for network purposes, so a direct sendBeacon/fetch to http://127.0.0.1
+    // is a public->private request that triggers Chromium's Private Network
+    // Access permission prompt. The background SW runs under the extension's
+    // own origin (with host_permissions) and is exempt from PNA, so it can
+    // fetch the loopback endpoint without any prompt.
     function emitAction(payload) {
-        if (!window.sendActionToPython) return;
         payload.url = window.location.href;
         payload.title = document.title;
         payload.is_iframe = isIframe;
-        window.sendActionToPython(JSON.stringify(payload));
+        try {
+            // Fire-and-forget: the callback exists only to swallow
+            // runtime.lastError (e.g. when the SW is mid-wake-up) so Chrome
+            // doesn't log an "unchecked runtime.lastError" warning.
+            chrome.runtime.sendMessage(payload, () => { void chrome.runtime.lastError; });
+        } catch (e) { /* SW not ready / page tearing down — ignore */ }
     }
 
     emitAction({ type: 'script_loaded', text: 'Telemetry script initialized' });
@@ -335,15 +357,8 @@
         emitAction({ type: 'page_changed', newUrl: location.href, reason: 'hashchange' });
     });
 
-    // 5. Track Tabs/Windows Opened by JS (Restored)
-    const originalOpen = window.open;
-    window.open = function(url, targetName, windowFeatures) {
-        emitAction({
-            type: 'window_opened',
-            target_url: url,
-            target_name: targetName
-        });
-        return originalOpen.apply(this, arguments);
-    };
+    // Popups opened via window.open are detected on the Python side through
+    // CDP TargetCreated events, so no JS hook is needed here (and an isolated
+    // content script cannot override the page's main-world window.open anyway).
 
 })();

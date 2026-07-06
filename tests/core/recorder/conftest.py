@@ -44,7 +44,6 @@ from zendriver.cdp.network import (
     WebSocketResponse,
     WebSocketWillSendHandshakeRequest,
 )
-from zendriver.cdp.runtime import BindingCalled, ExecutionContextId
 from zendriver.cdp.security import SecurityState
 
 from automatiq.core import config
@@ -377,22 +376,18 @@ def make_ws_closed_event(
     )
 
 
-# ── Runtime event factory ─────────────────────────────────────────────────────
+# ── Action payload factory ────────────────────────────────────────────────────
 
 
-def make_binding_event(
-    name="sendActionToPython",
-    payload=None,
-    execution_context_id=1,
-):
-    if payload is None:
-        payload = '{"type": "click", "text": "Submit"}'
+def make_action_payload(action_type="click", **fields):
+    """Build a telemetry action payload dict as the extension would send it.
 
-    return BindingCalled(
-        name=name,
-        payload=payload,
-        execution_context_id=ExecutionContextId(execution_context_id),
-    )
+    Mirrors what telemetry.js POSTs to the ActionServer (before Python stamps
+    timestamps). Tests pass it directly to ``agent._process_action``.
+    """
+    payload = {"type": action_type}
+    payload.update(fields)
+    return payload
 
 
 # ── Pytest fixtures ───────────────────────────────────────────────────────────

@@ -8,13 +8,16 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import tempfile
+import threading
 from datetime import UTC, datetime
 
 import zendriver as zd
 from zendriver import cdp
 
-from .. import events
+from .. import config, events
+from .action_server import ActionServer
 from .blocklist_db import BlocklistDB
 from .cdp.helpers import TimestampConverter
 from .cdp.network import _NetworkHandlers
@@ -27,16 +30,7 @@ logger = logging.getLogger(__name__)
 class BrowserAgent(_TargetManager, _NetworkHandlers, _WebsocketHandlers):
     """Manages the headless/UI browser session, CDP event handlers, and data collection."""
 
-    def __init__(
-        self,
-        telemetry_js_path=None,
-        visuals_js_path=None,
-        blocklist: BlocklistDB | None = None,
-        proxy: str | None = None,
-    ):
-        _js_dir = os.path.join(os.path.dirname(__file__), "js")
-        self.telemetry_js_path = telemetry_js_path or os.path.join(_js_dir, "telemetry.js")
-        self.visuals_js_path = visuals_js_path or os.path.join(_js_dir, "visuals.js")
+    def __init__(self, blocklist: BlocklistDB | None = None, proxy: str | None = None):
         self.blocklist = blocklist
         # Proxy URL (e.g. "http://host:3128", "socks5://host:1080") passed to the
         # browser via --proxy-server. None means a direct connection.
@@ -54,6 +48,18 @@ class BrowserAgent(_TargetManager, _NetworkHandlers, _WebsocketHandlers):
         )
         self._ws_frames_file = open(os.path.join(self._data_dir.name, "ws_frames.jsonl"), "a", encoding="utf-8")
         self._actions_count = 0
+        # Guards actions.jsonl writes from the ActionServer thread.
+        self._actions_lock = threading.Lock()
+
+        # Shipped Chrome extension (telemetry + visuals content scripts).
+        # Copied to a writable temp dir at run_session start so config.js (the
+        # ActionServer port) can be baked in before --load-extension is passed.
+        self._extension_src_dir = os.path.join(os.path.dirname(__file__), "extension")
+        self._extension_dir: str | None = None
+
+        # ActionServer is started lazily in run_session (never in __init__) so
+        # that constructing a BrowserAgent for tests has no thread/socket side effects.
+        self._action_server: ActionServer | None = None
 
         self.browser = None
         self.tab = None
@@ -94,38 +100,68 @@ class BrowserAgent(_TargetManager, _NetworkHandlers, _WebsocketHandlers):
             "ws_blocked_by_blocklist": 0,
         }
 
-        self.telemetry_script = ""
-        self.visuals_script = ""
+    def _prepare_extension(self, port: int) -> str | None:
+        """Copy the shipped extension to a writable temp dir and bake in the port.
 
-    def _load_scripts(self) -> bool:
+        Returns the path to pass to --load-extension, or None on failure.
+        """
+        if not os.path.isdir(self._extension_src_dir):
+            events.log_error.send("recorder", text=f"Extension source missing: {self._extension_src_dir}")
+            return None
+        ext_dir = os.path.join(self._data_dir.name, "extension")
         try:
-            with open(self.telemetry_js_path, encoding="utf-8") as f:
-                self.telemetry_script = f.read()
-            with open(self.visuals_js_path, encoding="utf-8") as f:
-                self.visuals_script = f.read()
-            return True
-        except FileNotFoundError as e:
-            events.log_error.send("recorder", text=f"Missing JS dependencies: {e}")
-            return False
+            shutil.copytree(self._extension_src_dir, ext_dir, dirs_exist_ok=True)
+        except Exception as exc:
+            events.log_error.send("recorder", text=f"Failed to stage extension: {exc}")
+            events.log_traceback.send("recorder")
+            return None
+        config_path = os.path.join(ext_dir, "config.js")
+        with open(config_path, "w", encoding="utf-8") as f:
+            f.write(f'var AUTOMATIQ_ENDPOINT = "http://127.0.0.1:{port}/act";\n')
+        return ext_dir
 
-    async def run_session(self, url: str, stop_token=None) -> dict:
-        if not self._load_scripts():
+    async def run_session(
+        self,
+        url: str,
+        stop_token=None,
+        browser_resolution: tuple[str, object | None, str] | None = None,
+    ) -> dict:
+        # Start the loopback ActionServer that receives telemetry from the
+        # extension's content scripts (replaces the fingerprintable CDP binding).
+        self._action_server = ActionServer(on_action=self._process_action)
+        port = self._action_server.start()
+        events.log_debug.send("recorder", text=f"ActionServer listening on 127.0.0.1:{port}")
+
+        ext_dir = self._prepare_extension(port)
+        if not ext_dir:
             return {}
+        self._extension_dir = ext_dir
 
         try:
             events.log_info.send("recorder", text="Starting Zendriver Browser...")
-            browser_args = [
-                "--incognito",
-                "--disable-popup-blocking",
-                f"--user-data-dir={self._profile_dir.name}",
-            ]
+            # Build the zendriver Config. When the CLI passed a resolved
+            # browser (downloaded Brave or Chrome fallback), honour it; else
+            # fall back to the legacy behaviour of letting BROWSER_TYPE drive
+            # zendriver's own autodetect.
+            zd_kwargs: dict = dict(user_data_dir=self._profile_dir.name, headless=False)
+            if browser_resolution is not None:
+                verb, value, descriptor = browser_resolution
+                if verb == "browser_executable_path" and value is not None:
+                    zd_kwargs["browser_executable_path"] = str(value)
+                    events.log_info.send("recorder", text=f"Using {descriptor}: {value}")
+                else:
+                    zd_kwargs["browser"] = str(value) if value is not None else config.BROWSER_TYPE
+                    events.log_info.send("recorder", text=f"Using {descriptor}")
+            else:
+                zd_kwargs["browser"] = config.BROWSER_TYPE
+            zd_config = zd.Config(**zd_kwargs)
+            zd_config.add_extension(ext_dir)
+            zd_config.add_argument("--disable-popup-blocking")
+            zd_config.add_argument("--disable-features=ProcessPerSiteUpToMainFrameThreshold")
             if self.proxy:
-                browser_args.append(f"--proxy-server={self.proxy}")
+                zd_config.add_argument(f"--proxy-server={self.proxy}")
                 events.log_info.send("recorder", text=f"Routing browser through proxy: {self.proxy}")
-            self.browser = await zd.start(
-                headless=False,
-                browser_args=browser_args,
-            )
+            self.browser = await zd.Browser.create(config=zd_config)
             self.recording_start = datetime.now(UTC)
 
             # 1. Get the primary tab
@@ -135,37 +171,60 @@ class BrowserAgent(_TargetManager, _NetworkHandlers, _WebsocketHandlers):
             main_session_id = getattr(self.tab, "session_id", "main")
             self.tabs[main_session_id] = {"tab": self.tab, "type": "page", "url": "about:blank"}
 
-            events.log_debug.send("recorder", text="Enabling CDP domains and binding handlers...")
+            events.log_debug.send(
+                "recorder",
+                text="Enabling Network domain and binding handlers.",
+            )
 
-            # Prioritize network domain
+            # Enable the Debugger domain and neutralize anti-debugger tripwires
+            # (eval("debugger") timing checks, e.g. bd.russismvarsha.com).
+            # setSkipAllPauses(True) makes V8 skip pauses entirely — the
+            # debugger; statement becomes a true no-op in ~0ms, so timing
+            # tripwires (>120ms = CDP detected) fail. The Debugger.Paused
+            # auto-resume handler is kept as defence-in-depth in case any
+            # pause slips through despite the skip flag.
+            #
+            # NOTE: "other" is included in the resume reasons because eval("debugger")
+            # in some contexts (e.g. injected <script> via document.write) pauses with
+            # reason="other" rather than "debuggerStatement". Without resuming "other",
+            # the page freezes and no interaction (clicks, typing) is possible.
+            await self.tab.send(cdp.debugger.enable())
+            await self.tab.send(cdp.debugger.set_skip_all_pauses(skip=True))
+
+            async def _on_debugger_paused(event: cdp.debugger.Paused):
+                if event.reason in ("debuggerStatement", "ambiguous", "assert", "other"):
+                    await self.tab.send(cdp.debugger.resume())
+
+            self.tab.add_handler(cdp.debugger.Paused, _on_debugger_paused)
+
+            # Network domain — telemetry/visuals are injected by the
+            # extension's content scripts on every page/popup/iframe natively.
             await self.tab.send(
                 cdp.network.enable(max_resource_buffer_size=100 * 1024 * 1024, max_total_buffer_size=1000 * 1024 * 1024)
             )
-            await self.tab.send(cdp.page.enable())
-            await self.tab.send(cdp.page.set_bypass_csp(enabled=True))
-            await self.tab.send(cdp.runtime.enable())
-            await self.tab.send(cdp.runtime.add_binding(name="sendActionToPython"))
 
-            # 2. Bind the main tab handlers EXPLICITLY using our new registry functions
+            # 2. Bind the main tab network handlers
             self._attach_handlers_to_tab(self.tab, main_session_id, is_iframe=False)
 
-            # Inject scripts into the main tab
-            await self.tab.send(
-                cdp.page.add_script_to_evaluate_on_new_document(source=self.telemetry_script, run_immediately=True)
-            )
-            await self.tab.send(
-                cdp.page.add_script_to_evaluate_on_new_document(source=self.visuals_script, run_immediately=True)
-            )
-
-            await self.tab.send(cdp.runtime.evaluate(expression=self.telemetry_script))
-            await self.tab.send(cdp.runtime.evaluate(expression=self.visuals_script))
-
-            # 3. Enable auto-attach for ANY FUTURE tabs/windows/iframes
-            await self.browser.connection.send(
-                cdp.target.set_auto_attach(auto_attach=True, wait_for_debugger_on_start=False, flatten=True)
-            )
-            self.browser.connection.add_handler(cdp.target.AttachedToTarget, self.target_created_handler)
-            await self.browser.connection.send(cdp.target.set_discover_targets(discover=True))
+            # 3. Enable auto-attach for ANY FUTURE tabs/windows so we can capture
+            # their network traffic (script injection is handled by the extension).
+            #
+            # Detect new tabs/windows via TargetCreated (sent by set_discover_targets)
+            # instead of auto-attach. zendriver already registers its own
+            # TargetCreated handler (adds Tab to self.browser.targets) and calls
+            # set_discover_targets in start(), so we just add our own handler to
+            # receive the same event.
+            #
+            # Why not use set_auto_attach (which we previously tried):
+            # Chrome requires flatten=True for browser-level auto-attach. flatten
+            # creates a flattened sub-session that intercepts Debugger.Paused
+            # events on the browser-level websocket — our per-tab Debugger.Paused
+            # handler (on the tab's own websocket) never sees them, so
+            # anti-debugger traps hang the tab.
+            # set_discover_targets + TargetCreated has no sessions, no pause, no
+            # flatten — the tab's websocket is the ONLY CDP session, so
+            # Debugger.Paused events go there and our auto-resume catches them.
+            self.browser.connection.add_handler(cdp.target.TargetCreated, self.target_created_handler)
 
             events.log_info.send("recorder", text=f"Navigating to {url}")
             await self.tab.send(cdp.page.navigate(url=url))
@@ -237,6 +296,11 @@ class BrowserAgent(_TargetManager, _NetworkHandlers, _WebsocketHandlers):
                 self._ws_connections_file.write(json.dumps(closed_record) + "\n")
             self._ws_connections_file.flush()
             self.active_websockets.clear()
+
+        # Stop the ActionServer BEFORE closing actions.jsonl so no handler races the close.
+        if self._action_server is not None:
+            self._action_server.stop()
+            self._action_server = None
 
         # Close stream files
         try:
