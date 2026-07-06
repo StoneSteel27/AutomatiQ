@@ -15,8 +15,12 @@ logger = logging.getLogger(__name__)
 # ── YAML serialization helpers ──────────────────────────────────────────────
 
 
-class _SessionDumper(yaml.Dumper):
-    """Custom Dumper that renders multi-line strings as literal block scalars."""
+class _SessionDumper(yaml.CSafeDumper if hasattr(yaml, "CSafeDumper") else yaml.Dumper):
+    """Custom Dumper that renders multi-line strings as literal block scalars.
+
+    Inherits from CSafeDumper (libyaml C bindings) when available for speed,
+    falling back to the pure-Python Dumper otherwise.
+    """
 
 
 def _multiline_presenter(dumper, data):
@@ -217,11 +221,20 @@ def init_history_dir(session_name: str) -> Path:
 
 
 def save_session_snapshot(history_dir: Path, messages: list[dict], metadata: dict) -> None:
-    """Write messages_full.yaml as {metadata: ..., messages: [...]}."""
+    """Write messages_full.yaml as {metadata: ..., messages: [...]}.
+
+    Uses JSON instead of YAML for serialization speed — the full messages list
+    can contain multi-MB tool outputs, and PyYAML's pure-Python string analysis
+    (especially with block-scalar style) is O(n) per string. JSON is C-optimized
+    and 10-100x faster for large payloads. yaml.safe_load() in the loader parses
+    JSON transparently (JSON is a YAML 1.2 subset), so backward compat is preserved.
+    """
+    import json
+
     payload = {"metadata": metadata, "messages": messages}
     path = history_dir / "messages_full.yaml"
     with open(path, "w", encoding="utf-8") as f:
-        yaml.dump(payload, f, Dumper=_SessionDumper, sort_keys=False, allow_unicode=True)
+        json.dump(payload, f, indent=2, ensure_ascii=False, default=str)
     logger.info(f"Saved session snapshot to {path}")
 
 
@@ -237,11 +250,19 @@ def save_compressed_snapshot(history_dir: Path, messages: list[dict]) -> None:
 def load_session_messages(history_dir: Path) -> list[dict]:
     """Load messages from messages_full.yaml.
 
-    Handles both legacy (bare list) and new ({metadata, messages} dict) formats.
+    Handles JSON (new format, fast), YAML dict (legacy), and bare-list (legacy) formats.
+    yaml.safe_load parses JSON transparently, but we add an explicit json fallback
+    for edge cases where libyaml's JSON parsing differs.
     """
+    import json
+
     path = history_dir / "messages_full.yaml"
     with open(path, encoding="utf-8") as f:
-        data = yaml.safe_load(f)
+        raw = f.read()
+    try:
+        data = yaml.safe_load(raw)
+    except Exception:
+        data = json.loads(raw)
     if isinstance(data, list):
         return data
     if isinstance(data, dict) and "messages" in data:

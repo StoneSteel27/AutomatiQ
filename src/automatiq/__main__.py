@@ -237,6 +237,160 @@ def _apply_config_overrides(args):
         config.BANNER_ENABLED = False
     if getattr(args, "verbose", False):
         config.VERBOSE = True
+    if getattr(args, "browser", None):
+        config.BROWSER_TYPE = args.browser
+
+
+def _browser_progress_callback():
+    """Return a Rich-aware progress callback for browser downloads.
+
+    The callback prints a single updated line per chunk to avoid spamming the
+    console while still showing progress. Yields ``None`` if rich isn't ready.
+    """
+    from rich.progress import (
+        BarColumn,
+        DownloadColumn,
+        Progress,
+        TextColumn,
+        TimeRemainingColumn,
+        TransferSpeedColumn,
+    )
+
+    from .cli.console import console
+
+    progress = Progress(
+        TextColumn("[bold blue]{task.fields[label]}"),
+        BarColumn(),
+        DownloadColumn(),
+        TransferSpeedColumn(),
+        TimeRemainingColumn(),
+        console=console,
+        transient=False,
+    )
+    task_id = None
+
+    def _cb(downloaded: int, total: int) -> None:
+        nonlocal task_id
+        if task_id is None:
+            if total <= 0:
+                # Unknown size — just show a counter.
+                task_id = progress.add_task("download", label="Brave", total=None)
+            else:
+                task_id = progress.add_task("download", label="Brave", total=total)
+            progress.start()
+        progress.update(task_id, completed=downloaded, total=total or None)
+
+    progress.start()
+    return _cb, progress
+
+
+def _confirm_brave_download(question: str) -> bool:
+    """Ask the user whether to download Brave. Defaults to yes on Enter."""
+    from .cli.console import console
+
+    try:
+        # Pause any active listener so keystrokes go to the prompt.
+        from .cli.console import _active_listener
+
+        if _active_listener:
+            _active_listener.pause()
+        try:
+            import time
+
+            time.sleep(0.1)
+            console.print()
+            console.print(
+                "[bold yellow]Brave not found.[/bold yellow] Brave ships built-in "
+                "anti-fingerprinting and anti-tracking protections that help keep "
+                "the recorder stealthy against websites — fewer detection signals "
+                "than a default Chrome profile, making it less likely your automation "
+                "is noticed by anti-bot defenses."
+            )
+            console.print()
+            ans = (
+                console.input("[bold cyan]Download a portable Brave copy now? (~300 MB) [Y/n] [/bold cyan]")
+                .strip()
+                .lower()
+            )
+        finally:
+            if _active_listener:
+                _active_listener.resume()
+    except Exception:
+        # If anything goes wrong with the prompt, default to yes (download).
+        return True
+    return ans in ("", "y", "yes")
+
+
+def _resolve_browser_for_recording(args) -> tuple[str, object | None, str]:
+    """Decide which browser to launch for record/run, prompting if needed.
+
+    Returns a ``(verb, value, descriptor)`` tuple suitable for
+    ``BrowserAgent.run_session``.  When the CLI flags opt out of auto-download
+    (``--no-auto-download-browser``), or the user answers "no" to the prompt,
+    we fall straight through to whatever Chrome zendriver can find.
+    """
+    from .core.browser_manager import resolve_browser_for_recording
+
+    no_auto = bool(getattr(args, "no_auto_download_browser", False))
+
+    if no_auto:
+        return resolve_browser_for_recording(
+            no_auto_download=True,
+            prompt_callback=None,
+        )
+
+    # Build a progress callback lazily — only used if we actually download.
+    progress_holder: dict = {}
+
+    def _prompt_then_maybe_download(question: str) -> bool:
+        agreed = _confirm_brave_download(question)
+        if not agreed:
+            return False
+        # User said yes — set up the progress callback for the download.
+        cb, progress = _browser_progress_callback()
+        progress_holder["cb"] = cb
+        progress_holder["progress"] = progress
+        return True
+
+    try:
+        return resolve_browser_for_recording(
+            no_auto_download=False,
+            prompt_callback=_prompt_then_maybe_download,
+            progress_callback=lambda d, t: progress_holder.get("cb", lambda *_: None)(d, t),
+        )
+    finally:
+        progress = progress_holder.get("progress")
+        if progress is not None:
+            progress.stop()
+
+
+def cmd_setup(args):
+    """`automatiq setup brave` — download a portable Brave browser."""
+    from .core import config
+    from .core.browser_manager import ensure_brave, find_brave_executable
+
+    _apply_config_overrides(args)
+    channel = getattr(args, "channel", None) or config.BROWSER_CHANNEL
+    force = bool(getattr(args, "force", False))
+
+    # If already cached and user didn't force, just print the path.
+    if not force:
+        cached = find_brave_executable(channel=channel)
+        if cached is not None:
+            info(f"Brave ({channel}) is already available: {cached}")
+            info("Use --force to re-download.")
+            return
+
+    info(f"Downloading Brave ({channel})...")
+    cb, progress = _browser_progress_callback()
+    try:
+        path = ensure_brave(channel=channel, progress_callback=cb, force=force)
+        info(f"Brave ready: {path}")
+    except Exception as exc:
+        error(f"Failed to download Brave: {exc}")
+        sys.exit(1)
+    finally:
+        progress.stop()
 
 
 def cmd_record(args):
@@ -290,6 +444,7 @@ def cmd_record(args):
             skip_callback=get_cli_skip_callback(),
             proxy=getattr(args, "proxy", None),
             no_proxy=getattr(args, "no_proxy", False),
+            browser_resolution=_resolve_browser_for_recording(args),
         )
     except KeyboardInterrupt:
         from .cli.console import warn
@@ -446,6 +601,7 @@ def cmd_run(args):
             skip_callback=get_cli_skip_callback(),
             proxy=getattr(args, "proxy", None),
             no_proxy=getattr(args, "no_proxy", False),
+            browser_resolution=_resolve_browser_for_recording(args),
         )
     except KeyboardInterrupt:
         from .cli.console import warn
@@ -522,6 +678,7 @@ def _print_rich_help():
     t.add_row("agent", "Analyse a recorded workspace and produce an automation script (defaults to latest)")
     t.add_row("resume [name]", "Resume a previous agent session from history")
     t.add_row("run <url>", "Record a session then immediately launch the agent")
+    t.add_row("setup brave", "Download a portable Brave browser (anti-fingerprinting for stealth)")
     console.print(t)
     console.print()
 
@@ -552,6 +709,7 @@ def _print_rich_help():
     t3.add_row("  models", "LLM model strings and custom API endpoints")
     t3.add_row("  agent", "Max iterations and sandbox timeouts")
     t3.add_row("  recording", "Capture FPS, clip padding, and merge thresholds")
+    t3.add_row("  browser", "Which browser to use for recording (chrome/brave/auto)")
     t3.add_row("  recorder_proxy", "Recording browser proxy (HTTP/SOCKS) and dynamic providers")
     t3.add_row("  banner", "Startup animation toggle and speed")
     t3.add_row("  output", "Root directory for all generated output")
@@ -572,6 +730,8 @@ def _print_rich_help():
     t4.add_row("--output-dir PATH", "Root directory for all output (default: ./output)")
     t4.add_row("--proxy URL", "Route the recording browser through a proxy (record/run only)")
     t4.add_row("--no-proxy", "Force a direct connection, overriding config (record/run only)")
+    t4.add_row("--browser TYPE", "Browser to use: chrome, brave, or auto (record/run only)")
+    t4.add_row("--no-auto-download-browser", "Skip the Brave download prompt; use installed Chrome (record/run)")
     t4.add_row("--no-banner", "Skip the startup animation")
     t4.add_row("--verbose", "Show detailed diagnostic output")
     t4.add_row("-V, --version", "Show version")
@@ -613,7 +773,7 @@ def main():
     if banner_base_url:
         config.API_BASE = banner_base_url
 
-    if config.BANNER_ENABLED and cmd in ("record", "agent", "run", "resume"):
+    if config.BANNER_ENABLED and cmd in ("record", "agent", "run", "resume", "setup"):
         _banner_done.clear()  # gate: buffer any preload logs during animation
 
         # Determine session name for banner (agent and resume-with-name only)
@@ -694,6 +854,20 @@ def main():
     p_record = subparsers.add_parser("record", add_help=False)
     p_record.add_argument("url", nargs="?", default="about:blank")
     p_record.add_argument("--name", type=str, default=None, help="Name of the session folder")
+    p_record.add_argument(
+        "--browser",
+        type=str,
+        default=None,
+        choices=["chrome", "brave", "auto"],
+        help="Browser to use for recording",
+    )
+    p_record.add_argument(
+        "--no-auto-download-browser",
+        action="store_true",
+        default=False,
+        dest="no_auto_download_browser",
+        help="Do not prompt to download Brave; fall back to installed Chrome",
+    )
     _add_common_flags(p_record, include_recorder_model=True)
     _add_proxy_flags(p_record)
     p_record.set_defaults(func=cmd_record)
@@ -711,9 +885,39 @@ def main():
     p_run = subparsers.add_parser("run", add_help=False)
     p_run.add_argument("url", nargs="?", default="about:blank")
     p_run.add_argument("--name", type=str, default=None, help="Name of the session folder")
+    p_run.add_argument(
+        "--browser",
+        type=str,
+        default=None,
+        choices=["chrome", "brave", "auto"],
+        help="Browser to use for recording",
+    )
+    p_run.add_argument(
+        "--no-auto-download-browser",
+        action="store_true",
+        default=False,
+        dest="no_auto_download_browser",
+        help="Do not prompt to download Brave; fall back to installed Chrome",
+    )
     _add_common_flags(p_run, include_recorder_model=True)
     _add_proxy_flags(p_run)
     p_run.set_defaults(func=cmd_run)
+
+    p_setup = subparsers.add_parser("setup", add_help=False)
+    p_setup_sub = p_setup.add_subparsers(dest="setup_target")
+    p_setup_brave = p_setup_sub.add_parser("brave", add_help=False)
+    p_setup_brave.add_argument(
+        "--channel",
+        type=str,
+        default=None,
+        choices=["release", "beta", "nightly"],
+        help="Brave release channel (default: release, or value from config.toml)",
+    )
+    p_setup_brave.add_argument("--force", action="store_true", default=False, help="Re-download even if cached")
+    _add_common_flags(p_setup_brave)
+    p_setup_brave.set_defaults(func=cmd_setup)
+    # When `setup` is run without a sub-target, show help.
+    p_setup.set_defaults(func=lambda a: (_print_rich_help(), sys.exit(0)))
 
     args = parser.parse_args()
 
