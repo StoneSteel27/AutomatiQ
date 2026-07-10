@@ -337,19 +337,26 @@ class TestFindBraveExecutable:
         monkeypatch.setattr(config, "BROWSER_EXECUTABLE_PATH", None)
         monkeypatch.setattr("automatiq.core.browser_manager.config.BROWSER_EXECUTABLE_PATH", None)
 
+        from automatiq.core.browser_manager import _ASSET_MAP, _detect_platform
+        os_name, arch = _detect_platform()
+        exe_rel = _ASSET_MAP[(os_name, arch)][1]
+
         # Create two version dirs — the one with larger mtime should win.
         v1 = tmp_path / "brave" / "v1.0.0"
-        v1.mkdir(parents=True)
-        (v1 / "brave.exe").write_text("old")
+        v1_exe = v1 / exe_rel
+        v1_exe.parent.mkdir(parents=True, exist_ok=True)
+        v1_exe.write_text("old")
+
         v2 = tmp_path / "brave" / "v2.0.0"
-        v2.mkdir(parents=True)
-        (v2 / "brave.exe").write_text("new")
+        v2_exe = v2 / exe_rel
+        v2_exe.parent.mkdir(parents=True, exist_ok=True)
+        v2_exe.write_text("new")
 
         with patch("shutil.which", return_value=None):
             result = find_brave_executable()
         assert result is not None
         # Should return the newer one (by mtime — v2 was created after v1).
-        assert "v2.0.0" in str(result) or result == v2 / "brave.exe"
+        assert "v2.0.0" in str(result) or result == v2_exe
 
     def test_cache_filters_by_channel_via_manifest(self, tmp_path, monkeypatch):
         monkeypatch.setattr(config, "BROWSERS_DIR", tmp_path)
@@ -357,9 +364,14 @@ class TestFindBraveExecutable:
         monkeypatch.setattr(config, "BROWSER_EXECUTABLE_PATH", None)
         monkeypatch.setattr("automatiq.core.browser_manager.config.BROWSER_EXECUTABLE_PATH", None)
 
+        from automatiq.core.browser_manager import _ASSET_MAP, _detect_platform
+        os_name, arch = _detect_platform()
+        exe_rel = _ASSET_MAP[(os_name, arch)][1]
+
         v_dir = tmp_path / "brave" / "v1.0.0"
-        v_dir.mkdir(parents=True)
-        (v_dir / "brave.exe").write_text("brave")
+        v_exe = v_dir / exe_rel
+        v_exe.parent.mkdir(parents=True, exist_ok=True)
+        v_exe.write_text("brave")
         (v_dir / ".automatiq-manifest.json").write_text(
             json.dumps({"channel": "beta", "published": "2025-01-01T00:00:00Z", "tag": "v1.0.0"}),
             encoding="utf-8",
