@@ -17,7 +17,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-VERSION = "0.3.0a1"
+VERSION = "0.3.0"
 
 # ── Persistent user-level directory (~/.automatiq/) ──────────────────────────
 # Stores binaries, logs, history, and user preferences across sessions.
