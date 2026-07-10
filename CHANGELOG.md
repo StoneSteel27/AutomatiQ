@@ -5,6 +5,11 @@ All notable changes to AutomatiQ are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] — 2026-07-10
+
+### Fixed
+- **Cross-Platform Cache Tests** — Made `find_brave_executable` cache tests dynamically adapt to the active platform's executable filename naming convention (`brave-browser` on Linux, `Brave Browser.app...` on macOS), resolving a platform testing failure in the GitHub Actions runner environment.
+
 ## [0.3.0] — 2026-07-10
 
 ### Added
