@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import shutil
+import sys
 import tempfile
 import threading
 from datetime import UTC, datetime
@@ -25,6 +26,21 @@ from .cdp.targets import _TargetManager
 from .cdp.websockets import _WebsocketHandlers
 
 logger = logging.getLogger(__name__)
+
+
+BROWSER_UX_FLAGS = [
+    # Hide browser-maintenance UI
+    "--disable-brave-update",
+    "--disable-features=OutdatedBuildDetector",
+    "--no-default-browser-check",
+    "--no-first-run",
+    "--no-service-autorun",
+    # Avoid launch/relaunch disruption
+    "--disable-session-crashed-bubble",
+    "--hide-crash-restore-bubble",
+    # Keep the automation window focused on the target site
+    "--disable-background-networking",
+]
 
 
 class BrowserAgent(_TargetManager, _NetworkHandlers, _WebsocketHandlers):
@@ -100,6 +116,16 @@ class BrowserAgent(_TargetManager, _NetworkHandlers, _WebsocketHandlers):
             "ws_blocked_by_blocklist": 0,
         }
 
+    def __del__(self) -> None:
+        for attr in ("_actions_file", "_requests_file", "_ws_connections_file", "_ws_frames_file"):
+            if hasattr(self, attr):
+                f = getattr(self, attr)
+                if f and not f.closed:
+                    try:
+                        f.close()
+                    except Exception:
+                        pass
+
     def _prepare_extension(self, port: int) -> str | None:
         """Copy the shipped extension to a writable temp dir and bake in the port.
 
@@ -154,10 +180,18 @@ class BrowserAgent(_TargetManager, _NetworkHandlers, _WebsocketHandlers):
                     events.log_info.send("recorder", text=f"Using {descriptor}")
             else:
                 zd_kwargs["browser"] = config.BROWSER_TYPE
+            if sys.platform == "darwin":
+                zd_kwargs["sandbox"] = False
+                zd_kwargs["browser_connection_timeout"] = 1.0
+                zd_kwargs["browser_connection_max_tries"] = 20
             zd_config = zd.Config(**zd_kwargs)
+            if sys.platform == "darwin":
+                zd_config.add_argument("--use-mock-keychain")
             zd_config.add_extension(ext_dir)
             zd_config.add_argument("--disable-popup-blocking")
             zd_config.add_argument("--disable-features=ProcessPerSiteUpToMainFrameThreshold")
+            for flag in BROWSER_UX_FLAGS:
+                zd_config.add_argument(flag)
             if self.proxy:
                 zd_config.add_argument(f"--proxy-server={self.proxy}")
                 events.log_info.send("recorder", text=f"Routing browser through proxy: {self.proxy}")

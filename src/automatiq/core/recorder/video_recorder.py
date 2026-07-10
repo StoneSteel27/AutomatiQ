@@ -1,6 +1,7 @@
 import logging
 import os
 import subprocess
+import sys
 import threading
 import time
 
@@ -84,6 +85,21 @@ class ActionVideoRecorder:
                     if sleep_time > 0:
                         time.sleep(sleep_time)
 
+        except mss.exception.ScreenShotError as e:
+            if sys.platform == "darwin" and "CGWindowListCreateImage" in str(e):
+                events.log_error.send(
+                    "recorder",
+                    text="Screen recording permission denied — AutomatiQ needs access to capture video.\n\n"
+                    "To fix this:\n"
+                    "  1. Open System Settings > Privacy & Security > Screen & System Audio Recording\n"
+                    "  2. Enable the toggle for your terminal app (Terminal, iTerm2, VS Code, etc.)\n"
+                    "  3. Restart your terminal and run AutomatiQ again\n\n"
+                    "If the toggle is already enabled, try toggling it off and back on — macOS "
+                    "sometimes caches a stale permission grant.",
+                )
+            else:
+                events.log_error.send("recorder", text=f"Screen capture failed: {e}")
+            events.log_traceback.send("recorder")
         except Exception as e:
             events.log_error.send("recorder", text=f"Video recording thread failed: {e}")
             events.log_traceback.send("recorder")

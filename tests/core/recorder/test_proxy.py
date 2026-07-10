@@ -172,3 +172,10 @@ class TestBrowserAgentProxy:
     def test_default_proxy_is_none(self):
         agent = BrowserAgent(blocklist=None)
         assert agent.proxy is None
+
+    def test_browser_ux_flags_present(self):
+        from automatiq.core.recorder.browser_agent import BROWSER_UX_FLAGS
+
+        assert "--disable-brave-update" in BROWSER_UX_FLAGS
+        assert "--no-first-run" in BROWSER_UX_FLAGS
+        assert "--disable-background-networking" in BROWSER_UX_FLAGS

@@ -19,7 +19,9 @@ import hashlib
 import json
 import logging
 import shutil
+import subprocess
 import sys
+import tempfile
 import zipfile
 from collections.abc import Callable
 from pathlib import Path
@@ -35,20 +37,27 @@ _VERSIONS_URL = "https://versions.brave.com/latest/brave-versions.json"
 
 _CHANNELS = ("release", "beta", "nightly")
 
-# (os_name, arch) -> (zip-name template, executable path *relative to the
+# (os_name, arch) -> (archive-name template, executable path *relative to the
 # extracted archive's top-level dir*).
 #
-# Brave names zips inconsistently across platforms (windows uses "win32"
-# regardless of architecture, linux uses "linux-amd64", darwin uses "darwin").
-# We template the version into the asset name at lookup time.
+# Brave names their macOS DMG assets without a version number in the filename
+# (the version lives in the GitHub release URL path, not the asset name), while
+# the Windows/Linux zips embed the version. We template the version string into
+# whichever templates need it via ``{ver}`` at lookup time.
+#
+# macOS uses DMG (not ZIP) because Brave's darwin .zip assets are built with a
+# standard Linux `zip` invocation that fails to preserve symlinks (no `-y`
+# flag), corrupting the .app bundle's framework version symlinks and code
+# signature. DMGs are produced by the same macOS packaging toolchain that
+# signs the app, preserving symlinks, codesign, and extended attributes.
 _ASSET_MAP: dict[tuple[str, str], tuple[str, str]] = {
     ("windows", "amd64"): ("brave-v{ver}-win32-x64.zip", "brave.exe"),
     ("windows", "arm64"): ("brave-v{ver}-win32-arm64.zip", "brave.exe"),
     ("windows", "ia32"): ("brave-v{ver}-win32-ia32.zip", "brave.exe"),
     ("linux", "amd64"): ("brave-browser-{ver}-linux-amd64.zip", "brave-browser"),
     ("linux", "arm64"): ("brave-browser-{ver}-linux-arm64.zip", "brave-browser"),
-    ("darwin", "amd64"): ("brave-v{ver}-darwin-x64.zip", "Brave Browser.app/Contents/MacOS/Brave Browser"),
-    ("darwin", "arm64"): ("brave-v{ver}-darwin-arm64.zip", "Brave Browser.app/Contents/MacOS/Brave Browser"),
+    ("darwin", "amd64"): ("Brave-Browser-x64.dmg", "Brave Browser.app/Contents/MacOS/Brave Browser"),
+    ("darwin", "arm64"): ("Brave-Browser-arm64.dmg", "Brave Browser.app/Contents/MacOS/Brave Browser"),
 }
 
 
@@ -112,7 +121,7 @@ def _pick_asset(
     os_name: str,
     arch: str,
 ) -> tuple[str, str, str]:
-    """Return ``(zip_url, sha256_url, exe_relative_path)`` for the given platform.
+    """Return ``(archive_url, sha256_url, exe_relative_path)`` for the given platform.
 
     Raises ``RuntimeError`` with a clear message if the platform is unsupported
     or the matching asset isn't in this release.
@@ -134,15 +143,15 @@ def _pick_asset(
     asset_name = asset_template.format(ver=ver_for_template)
 
     assets = version_entry.get("github", {}).get("assets", []) or []
-    zip_url = None
+    archive_url = None
     sha256_url = None
     for asset in assets:
         name = asset.get("name", "")
         if name == asset_name:
-            zip_url = asset.get("download_url")
+            archive_url = asset.get("download_url")
         elif name == f"{asset_name}.sha256":
             sha256_url = asset.get("download_url")
-    if not zip_url:
+    if not archive_url:
         raise RuntimeError(
             f"Brave release {ver_tag} has no asset named {asset_name!r}. "
             "This platform may not be packaged for this version."
@@ -152,7 +161,7 @@ def _pick_asset(
             f"Brave release {ver_tag} has no SHA256 file for {asset_name!r}. "
             "Refusing to download without a verifiable checksum."
         )
-    return zip_url, sha256_url, exe_rel
+    return archive_url, sha256_url, exe_rel
 
 
 def _download_text(url: str, label: str | None = None, retries: int = 3) -> str:
@@ -180,11 +189,123 @@ def _verify_sha256(zip_path: Path, sha256_url: str) -> bool:
     return actual == expected
 
 
-def _extract_brave(zip_path: Path, dest_dir: Path) -> None:
-    """Extract the entire Brave zip into *dest_dir*. Creates the directory."""
+def _extract_brave(archive_path: Path, dest_dir: Path) -> None:
+    """Extract the Brave archive into *dest_dir*. Creates the directory.
+
+    On macOS the archive is a DMG. We attach it with ``hdiutil`` at a private
+    mount point and copy the ``.app`` bundle out with ``shutil.copytree`` using
+    ``symlinks=True`` so that Unix symlinks inside the framework (e.g.
+    ``Versions/Current -> 150.1.92.134``) are preserved as symlinks rather
+    than being dereferenced into regular files. This preserves the bundle's
+    code signature too — without it Chromium's internal fork/relaunch step
+    crashes with ``exec: multi-threaded process forked``.
+
+    On Windows/Linux the archive is a ZIP and we fall back to ``zipfile``.
+    """
     dest_dir.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        zf.extractall(dest_dir)
+
+    if archive_path.suffix == ".dmg" and sys.platform == "darwin" and shutil.which("hdiutil") is not None:
+        mount_point = tempfile.mkdtemp(prefix="automatiq_brave_dmg_")
+        try:
+            subprocess.run(
+                ["hdiutil", "attach", "-nobrowse", "-mountpoint", mount_point, str(archive_path)],
+                check=True,
+                capture_output=True,
+            )
+            app_found: Path | None = None
+            for item in Path(mount_point).iterdir():
+                if item.suffix == ".app" and item.is_dir():
+                    app_found = item
+                    break
+            if app_found is None:
+                raise RuntimeError(
+                    f"No .app bundle found inside DMG {archive_path.name}. "
+                    "The DMG layout may have changed — please report this."
+                )
+            # ``symlinks=True`` is critical: it preserves the framework's
+            # ``Versions/Current`` and other internal symlinks as real links
+            # rather than dereferencing them into regular files.
+            shutil.copytree(app_found, dest_dir / app_found.name, symlinks=True)
+        finally:
+            # ``eject`` is more forceful than ``detach`` when something still
+            # holds a file descriptor — fall back to detach if eject fails.
+            subprocess.run(
+                ["hdiutil", "detach", mount_point, "-force"],
+                capture_output=True,
+            )
+            shutil.rmtree(mount_point, ignore_errors=True)
+    else:
+        with zipfile.ZipFile(archive_path, "r") as zf:
+            zf.extractall(dest_dir)
+
+
+def _remove_macos_quarantine(exe_path: Path) -> None:
+    """Remove Apple Gatekeeper quarantine from a downloaded Brave .app bundle.
+
+    When macOS downloads an archive from the internet, every file inside inherits
+    a ``com.apple.quarantine`` extended attribute. Without clearing it the user
+    either gets a "cannot be opened because the developer cannot be verified"
+    alert on first launch, or (starting in macOS 15 Sequoia) the browser is
+    blocked entirely until manually approved in System Settings.
+
+    We locate the ``.app`` bundle from the executable path and recursively strip
+    all extended attributes (``xattr -cr``), which is the standard recipe for
+    un-notarized browser downloads.
+    """
+    if sys.platform != "darwin":
+        return
+
+    app_bundle = exe_path
+    while app_bundle.parent != app_bundle:
+        if app_bundle.suffix == ".app" and app_bundle.is_dir():
+            break
+        app_bundle = app_bundle.parent
+    else:
+        return
+
+    try:
+        subprocess.run(
+            ["xattr", "-cr", str(app_bundle)],
+            capture_output=True,
+            check=True,
+            timeout=15,
+        )
+        logger.info(f"Cleared macOS quarantine on {app_bundle}")
+    except subprocess.CalledProcessError as exc:
+        logger.warning(
+            f"Could not clear quarantine on {app_bundle} (stderr: {exc.stderr.decode().strip()!r}). "
+            "You may need to right-click > Open the browser once, or run "
+            f"'xattr -cr {app_bundle}' manually."
+        )
+    except FileNotFoundError:
+        logger.debug("xattr not found — skipping quarantine removal (not macOS?)")
+    except Exception:
+        logger.debug("Unexpected error during quarantine removal — continuing anyway.")
+
+
+def _verify_macos_signature(app_bundle: Path) -> bool:
+    """Verify that the ``.app`` bundle has a valid code signature.
+
+    Returns ``True`` if ``codesign --verify --deep --strict`` passes. An invalid
+    signature indicates symlink corruption during extraction (Python's zipfile
+    on macOS writes symlink target paths as literal file content, which breaks
+    framework versioned symlinks and invalidates the bundle signature).
+    """
+    if sys.platform != "darwin":
+        return True
+    try:
+        result = subprocess.run(
+            ["codesign", "--verify", "--deep", "--strict", str(app_bundle)],
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.decode().strip()
+            logger.warning(f"Brave code signature invalid — likely symlink corruption during extraction: {stderr}")
+            return False
+        return True
+    except FileNotFoundError:
+        logger.debug("codesign not found — skipping signature verification (not macOS?)")
+        return True
 
 
 # ── Public API ───────────────────────────────────────────────────────────────
@@ -336,7 +457,7 @@ def ensure_brave(
     tag = latest.get("tag") or latest.get("name")
     if not tag:
         raise RuntimeError("Brave versions JSON returned an entry without a tag/name.")
-    zip_url, sha256_url, exe_rel = _pick_asset(latest, os_name, arch)
+    archive_url, sha256_url, exe_rel = _pick_asset(latest, os_name, arch)
 
     version_dir = _version_dir(tag)
     exe_path = version_dir / exe_rel
@@ -347,15 +468,15 @@ def ensure_brave(
     # Stage the download under a hidden subdir so we can clean up atomically.
     staging = _brave_cache_root() / ".staging" / tag
     staging.mkdir(parents=True, exist_ok=True)
-    zip_path = staging / zip_url.rsplit("/", 1)[-1]
-    sha_path = staging / f"{zip_path.name}.sha256"
+    archive_path = staging / archive_url.rsplit("/", 1)[-1]
+    sha_path = staging / f"{archive_path.name}.sha256"
 
     try:
-        _download_file(zip_url, zip_path, label=f"Brave {tag} ({channel})", progress_callback=progress_callback)
+        _download_file(archive_url, archive_path, label=f"Brave {tag} ({channel})", progress_callback=progress_callback)
         _download_file(sha256_url, sha_path, label=f"Brave {tag} sha256")
         expected = _strip_sha256(sha_path.read_text(encoding="utf-8", errors="replace"))
         h = hashlib.sha256()
-        with open(zip_path, "rb") as fp:
+        with open(archive_path, "rb") as fp:
             for chunk in iter(lambda: fp.read(1024 * 1024), b""):
                 h.update(chunk)
         actual = h.hexdigest().lower()
@@ -368,7 +489,7 @@ def ensure_brave(
         # Extract.
         if version_dir.exists():
             shutil.rmtree(version_dir, ignore_errors=True)
-        _extract_brave(zip_path, version_dir)
+        _extract_brave(archive_path, version_dir)
 
         # Defensive chmod on POSIX (the zip usually preserves Unix perms, but
         # some Windows-zipped Unix builds drop the exec bit).
@@ -383,6 +504,24 @@ def ensure_brave(
         # single nested top-level dir and lift its contents up so the final
         # layout is always ``version_dir/<exe_rel>``.
         _flatten_single_nested_dir(version_dir, exe_rel)
+
+        _remove_macos_quarantine(exe_path)
+
+        if sys.platform == "darwin":
+            app_bundle = exe_path
+            while app_bundle.parent != app_bundle:
+                if app_bundle.suffix == ".app" and app_bundle.is_dir():
+                    break
+                app_bundle = app_bundle.parent
+            if not _verify_macos_signature(app_bundle):
+                shutil.rmtree(version_dir, ignore_errors=True)
+                raise RuntimeError(
+                    f"Extracted Brave at {version_dir} has an invalid code signature. "
+                    "This usually means the framework layout or code signature was corrupted. "
+                    "Delete the cached copy and try again:\n"
+                    f"  rm -rf {version_dir}\n"
+                    "Then re-run AutomatiQ — it will re-download and mount/extract the DMG correctly."
+                )
 
         _write_manifest(version_dir, latest)
         return exe_path

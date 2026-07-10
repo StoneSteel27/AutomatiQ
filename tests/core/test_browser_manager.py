@@ -58,20 +58,20 @@ def _synthetic_versions(channel: str = "release", tag: str = "v1.92.134") -> lis
                         "download_url": "https://github.com/brave/brave-browser/releases/download/v1.92.134/brave-browser-1.92.134-linux-amd64.zip.sha256",
                     },
                     {
-                        "name": "brave-v1.92.134-darwin-x64.zip",
-                        "download_url": "https://github.com/brave/brave-browser/releases/download/v1.92.134/brave-v1.92.134-darwin-x64.zip",
+                        "name": "Brave-Browser-x64.dmg",
+                        "download_url": "https://github.com/brave/brave-browser/releases/download/v1.92.134/Brave-Browser-x64.dmg",
                     },
                     {
-                        "name": "brave-v1.92.134-darwin-x64.zip.sha256",
-                        "download_url": "https://github.com/brave/brave-browser/releases/download/v1.92.134/brave-v1.92.134-darwin-x64.zip.sha256",
+                        "name": "Brave-Browser-x64.dmg.sha256",
+                        "download_url": "https://github.com/brave/brave-browser/releases/download/v1.92.134/Brave-Browser-x64.dmg.sha256",
                     },
                     {
-                        "name": "brave-v1.92.134-darwin-arm64.zip",
-                        "download_url": "https://github.com/brave/brave-browser/releases/download/v1.92.134/brave-v1.92.134-darwin-arm64.zip",
+                        "name": "Brave-Browser-arm64.dmg",
+                        "download_url": "https://github.com/brave/brave-browser/releases/download/v1.92.134/Brave-Browser-arm64.dmg",
                     },
                     {
-                        "name": "brave-v1.92.134-darwin-arm64.zip.sha256",
-                        "download_url": "https://github.com/brave/brave-browser/releases/download/v1.92.134/brave-v1.92.134-darwin-arm64.zip.sha256",
+                        "name": "Brave-Browser-arm64.dmg.sha256",
+                        "download_url": "https://github.com/brave/brave-browser/releases/download/v1.92.134/Brave-Browser-arm64.dmg.sha256",
                     },
                     {
                         "name": "brave-browser-1.92.134-linux-arm64.zip",
@@ -108,11 +108,28 @@ def _make_nested_brave_zip(inner_dir: str, exe_rel_path: str) -> bytes:
 
 @pytest.fixture
 def clean_browsers_dir(tmp_path, monkeypatch):
-    """Point BROWSERS_DIR to a temp for the test."""
+    """Point BROWSERS_DIR to a temp for the test.
+
+    Also stubs ``shutil.which`` to return ``None`` so that
+    ``find_brave_executable`` (called by ``ensure_brave``) never scans the
+    host ``PATH`` for a system-installed Brave. This avoids two problems:
+
+      1. On Windows / VMs the full PATH scan is dominated by slow directory
+         enumeration across shared drives, multi-hundred-entry PATHs, etc.
+         Repeating it across ~30 tests added tens of seconds of wall time.
+      2. If the developer happens to have Brave installed system-wide, the
+         cache-miss branch we are trying to exercise would be silently
+         bypassed and several tests would assert on a path they never built.
+
+    Behaviour in GitHub Actions is unchanged: CI runners do not have Brave
+    on their PATH, so ``shutil.which`` already returns ``None`` there — this
+    mock just makes that explicit and constant across all developer hosts.
+    """
     monkeypatch.setattr(config, "BROWSERS_DIR", tmp_path)
     monkeypatch.setattr("automatiq.core.browser_manager.config.BROWSERS_DIR", tmp_path)
     monkeypatch.setattr(config, "BROWSER_EXECUTABLE_PATH", None)
     monkeypatch.setattr("automatiq.core.browser_manager.config.BROWSER_EXECUTABLE_PATH", None)
+    monkeypatch.setattr("shutil.which", lambda _name: None)
     yield tmp_path
     # Restore after test
     monkeypatch.setattr(config, "BROWSERS_DIR", Path(config.HOME_DIR) / "browsers")
@@ -171,7 +188,7 @@ def mock_download(monkeypatch, tmp_path):
                 exe_rel = "brave.exe"
             elif "linux" in url:
                 exe_rel = "brave-browser"
-            elif "darwin" in url:
+            elif "darwin" in url or "Brave-Browser" in url:
                 exe_rel = "Brave Browser.app/Contents/MacOS/Brave Browser"
             else:
                 exe_rel = None
@@ -193,21 +210,21 @@ class TestAssetMapping:
     """Cross-platform asset name mapping."""
 
     @pytest.mark.parametrize(
-        "os_name, arch, expected_zip, expected_exe",
+        "os_name, arch, expected_archive, expected_exe",
         [
             ("windows", "amd64", "brave-v{ver}-win32-x64.zip", "brave.exe"),
             ("windows", "arm64", "brave-v{ver}-win32-arm64.zip", "brave.exe"),
             ("windows", "ia32", "brave-v{ver}-win32-ia32.zip", "brave.exe"),
             ("linux", "amd64", "brave-browser-{ver}-linux-amd64.zip", "brave-browser"),
             ("linux", "arm64", "brave-browser-{ver}-linux-arm64.zip", "brave-browser"),
-            ("darwin", "amd64", "brave-v{ver}-darwin-x64.zip", "Brave Browser.app/Contents/MacOS/Brave Browser"),
-            ("darwin", "arm64", "brave-v{ver}-darwin-arm64.zip", "Brave Browser.app/Contents/MacOS/Brave Browser"),
+            ("darwin", "amd64", "Brave-Browser-x64.dmg", "Brave Browser.app/Contents/MacOS/Brave Browser"),
+            ("darwin", "arm64", "Brave-Browser-arm64.dmg", "Brave Browser.app/Contents/MacOS/Brave Browser"),
         ],
     )
-    def test_asset_map_has_all_entries(self, os_name, arch, expected_zip, expected_exe):
+    def test_asset_map_has_all_entries(self, os_name, arch, expected_archive, expected_exe):
         assert (os_name, arch) in _ASSET_MAP
         template, exe = _ASSET_MAP[(os_name, arch)]
-        assert template == expected_zip
+        assert template == expected_archive
         assert exe == expected_exe
 
     def test_pick_asset_windows_x64(self):
@@ -227,7 +244,7 @@ class TestAssetMapping:
     def test_pick_asset_darwin_x64(self):
         versions = _synthetic_versions()
         zip_url, sha_url, exe_rel = _pick_asset(versions[0], "darwin", "amd64")
-        assert "darwin-x64.zip" in zip_url
+        assert "Brave-Browser-x64.dmg" in zip_url
         assert exe_rel == "Brave Browser.app/Contents/MacOS/Brave Browser"
 
     def test_pick_asset_missing_asset_raises(self):
@@ -303,7 +320,9 @@ class TestFindBraveExecutable:
         result = find_brave_executable()
         assert result == exe
 
-    def test_browser_executable_path_set_but_missing_returns_none(self, monkeypatch):
+    def test_browser_executable_path_set_but_missing_returns_none(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(config, "BROWSERS_DIR", tmp_path)
+        monkeypatch.setattr("automatiq.core.browser_manager.config.BROWSERS_DIR", tmp_path)
         monkeypatch.setattr(config, "BROWSER_EXECUTABLE_PATH", "/nonexistent/brave.exe")
         monkeypatch.setattr("automatiq.core.browser_manager.config.BROWSER_EXECUTABLE_PATH", "/nonexistent/brave.exe")
         monkeypatch.setattr(sys, "platform", "win32")
@@ -356,7 +375,9 @@ class TestFindBraveExecutable:
             assert result is not None
             assert "v1.0.0" in str(result)
 
-    def test_shutil_which_fallback(self, monkeypatch):
+    def test_shutil_which_fallback(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(config, "BROWSERS_DIR", tmp_path)
+        monkeypatch.setattr("automatiq.core.browser_manager.config.BROWSERS_DIR", tmp_path)
         monkeypatch.setattr(config, "BROWSER_EXECUTABLE_PATH", None)
         monkeypatch.setattr("automatiq.core.browser_manager.config.BROWSER_EXECUTABLE_PATH", None)
         with patch("shutil.which", return_value="/usr/bin/brave"):
@@ -415,7 +436,7 @@ class TestEnsureBrave:
         manifest = path.parent / ".automatiq-manifest.json"
         assert manifest.exists()
 
-    def test_ensure_brave_is_idempotent(self, clean_browsers_dir, mock_fetch, monkeypatch):
+    def test_ensure_brave_is_idempotent(self, clean_browsers_dir, mock_fetch, mock_download, monkeypatch):
         monkeypatch.setattr(sys, "platform", "win32")
         with patch("automatiq.core.browser_manager._detect_platform", return_value=("windows", "amd64")):
             path1 = ensure_brave(channel="release")
