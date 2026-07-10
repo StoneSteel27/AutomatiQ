@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://discord.gg/8j7dFWMMDA"><img src="https://img.shields.io/badge/Discord-Join-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord"></a>
-  <img src="https://img.shields.io/badge/Python-3.12+-blue?style=flat-square&logo=python&logoColor=white" alt="Python">
+  <img src="https://img.shields.io/badge/Python-3.11+-blue?style=flat-square&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/License-MIT-violet?style=flat-square" alt="License">
 </p>
 <p align="center">
@@ -36,7 +36,7 @@ AutomatiQ records HTTP requests, Websocket frames, and your interactions for rev
 
 ## Getting Started
 
-**Requirements:** Python 3.12+ and [Google Chrome](https://www.google.com/chrome/)
+**Requirements:** Python 3.11+ and [Google Chrome](https://www.google.com/chrome/)
 
 ```bash
 pip install automatiq

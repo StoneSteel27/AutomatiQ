@@ -480,7 +480,10 @@ class TestEnsureBrave:
 
     def test_darwin_binary_path(self, clean_browsers_dir, mock_fetch, mock_download, monkeypatch):
         monkeypatch.setattr(sys, "platform", "darwin")
-        with patch("automatiq.core.browser_manager._detect_platform", return_value=("darwin", "amd64")):
+        with (
+            patch("automatiq.core.browser_manager._detect_platform", return_value=("darwin", "amd64")),
+            patch("automatiq.core.browser_manager._verify_macos_signature", return_value=True),
+        ):
             path = ensure_brave(channel="release")
         assert path.name == "Brave Browser"
         assert "Brave Browser.app" in str(path)
