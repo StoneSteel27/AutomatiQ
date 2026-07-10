@@ -5,6 +5,28 @@ All notable changes to AutomatiQ are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-07-10
+
+### Added
+- **Zero-Fingerprint CDP Recorder** — Telemetry and visuals are now injected via a custom Chrome extension, and events are streamed back to a local loopback asyncio HTTP ActionServer (`/act`). This eliminates the detectable `CDP Runtime.addBinding` and `addScriptToEvaluateOnNewDocument` fingerprinting trace used by anti-bot systems.
+- **Brave Browser Integration** — Added full, first-class support for Brave as the default recorder browser to leverage its tracker blocking and fingerprinter randomization defenses. Includes a managed portable browser manager to automatically download, checksum-verify, and recursively strip Gatekeeper quarantine attributes on macOS under `~/.automatiq/browsers`.
+- **Anonymous Zero-Identity Telemetry** — Tracks high-level aggregate usage volumes (executed steps, token consumption, exception types, and browser choices) to identify and improve failure points without ever logging URLs, credentials, files, prompts, or generated code. Simple opt-out flags (`--no-telemetry` or `enabled = false` in `~/.automatiq/config.toml`) are supported.
+- **Interactive Multiline Feedback CLI** — New `automatiq feedback` command without arguments opens a rich, interactive multiline feedback input box powered by `prompt_toolkit` supporting hotkeys (`Enter` for newline, `Alt+Enter` to submit). Falls back automatically to a line-by-line stdin loop if `prompt_toolkit` is not installed.
+
+### Changed
+- **Redirect-Hop Tracking** — Upgraded network capture to persist and log all intermediate redirect hops (like `302 Found` login chains) with `redirected: true` and `redirected_to_url` markers. Prevents critical request parameters and post-data bodies from being discarded in complex login flows.
+- **Python 3.12+ Required** — Upgraded minimum supported and tested environment requirement to Python 3.12+. Removed support for Python 3.11 from test suites and package metadata.
+- **Linter Environment** — Upgraded reference pre-commit Python linter environment target to Python 3.12.
+- **Optimized Test Matrix** — Retired Windows runners from GitHub Actions matrix to focus on fast POSIX execution targets (macOS and Linux), saving workflow resources.
+- **Lazy-Load Resume Picker** — Refactored resume listing scanning to lazy-load YAML counters on-demand, showing the resumable sessions table instantly.
+
+### Fixed
+- **Windows Resource Locking** — Added explicit database and stream closures inside `BrowserAgent.__del__` and the video compilation pipeline, solving Windows-specific `PermissionError` unlinking locks on garbage collection.
+- **Isolate Test Directory Resolution** — Sandboxed local browser cache directory resolution inside testing frameworks to fully prevent development host cache pollution.
+
+### Removed
+- **Unreliable Domain Blocklists** — Cleared external domain blocklists that were prone to host migration failure and stale lookup latency.
+
 ## [0.2.2] — 2026-06-30
 
 ### Added
