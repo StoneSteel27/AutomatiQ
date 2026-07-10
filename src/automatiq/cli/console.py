@@ -26,9 +26,12 @@ try:
     from prompt_toolkit import prompt as pt_prompt
     from prompt_toolkit.formatted_text import HTML
     from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.validation import ValidationError, Validator
 
     HAS_PT = True
 except ImportError:
+    ValidationError = None
+    Validator = None
     HAS_PT = False
 
 from rich.console import Console
@@ -316,6 +319,69 @@ def prompt_continuation(width, line_number, is_soft_wrap):
     return "." * (width - 1) + " "
 
 
+def _pt_prompt(message: str, *, multiline: bool = False, validator=None, default: str = "") -> str:
+    global _active_listener
+    if _active_listener:
+        _active_listener.pause()
+    try:
+        time.sleep(0.1)
+        if HAS_PT:
+            kwargs = {"multiline": multiline, "default": default}
+            if multiline:
+                kwargs["prompt_continuation"] = prompt_continuation
+                kwargs["key_bindings"] = get_prompt_toolkit_bindings()
+            if validator is not None:
+                kwargs["validator"] = validator
+                kwargs["validate_while_typing"] = False
+            return pt_prompt(HTML(f"<ansicyan><bold>{message}</bold></ansicyan>"), **kwargs).strip()
+        if os.name != "nt":
+            return input(f"[1;36m{message}[0m").strip()
+        return console.input(f"[bold cyan]{message}[/bold cyan]").strip()
+    except (KeyboardInterrupt, EOFError):
+        raise
+    finally:
+        if _active_listener:
+            _active_listener.resume()
+
+
+def _build_session_name_validator():
+    if not HAS_PT or Validator is None:
+        return None
+
+    class _SessionNameValidator(Validator):
+        def validate(self, document):
+            text = document.text.strip()
+            if not text:
+                return
+            banned = set(r'<>:"/\|?*')
+            bad = next((ch for ch in text if ch in banned), None)
+            if bad is not None:
+                raise ValidationError(
+                    message=f"Session name cannot contain '{bad}'",
+                    cursor_position=document.cursor_position,
+                )
+            if text in {".", ".."}:
+                raise ValidationError(
+                    message="Session name cannot be '.' or '..'",
+                    cursor_position=document.cursor_position,
+                )
+
+    return _SessionNameValidator()
+
+
+def prompt_yes_no(message: str, *, default: bool = True) -> bool:
+    suffix = "[Y/n]" if default else "[y/N]"
+    while True:
+        answer = _pt_prompt(f"{message} {suffix} ").lower()
+        if not answer:
+            return default
+        if answer in {"y", "yes"}:
+            return True
+        if answer in {"n", "no"}:
+            return False
+        warn("Please enter y or n.")
+
+
 def prompt() -> str:
     global _active_listener
     if _active_listener:
@@ -474,6 +540,24 @@ def ask_resume_session(dirs: list | None = None, sessions: list | None = None) -
     return None
 
 
+def _track_force_quit() -> None:
+    """Fire a force-quit telemetry event and flush before os._exit kills the process."""
+    try:
+        from automatiq.core.telemetry import SystemCrashProps, client
+
+        client.track_system_crash(
+            SystemCrashProps(
+                crash_type="force_quit",
+                exception_class=None,
+                module=None,
+                active_command=client.active_command,
+            )
+        )
+        client.stop()
+    except Exception:
+        pass
+
+
 def start_cli_listeners(cancel_token: CancelToken, stop_token: StopToken, on_force_quit=None) -> CLIListener | None:
     if not sys.stdin.isatty():
         return None
@@ -495,6 +579,7 @@ def start_cli_listeners(cancel_token: CancelToken, stop_token: StopToken, on_for
                         on_force_quit()
                     except Exception:
                         pass
+                _track_force_quit()
                 os._exit(1)
             else:
                 stop_token.stop()
@@ -539,6 +624,7 @@ def start_cli_listeners(cancel_token: CancelToken, stop_token: StopToken, on_for
                                             on_force_quit()
                                         except Exception:
                                             pass
+                                    _track_force_quit()
                                     os._exit(1)
                                 else:
                                     stop_token.stop()

@@ -88,6 +88,26 @@ automatiq resume mysession       # Resume by name (skips picker if unique match)
 > [!Note]
 > Resume requires the original recording folder to still be in your current directory (the agent reads from both the history snapshot and the recording workspace).
 
+### 4. Sending feedback
+You can send quick inline feedback directly from your terminal:
+
+```bash
+automatiq feedback "The agent struggles with shadow DOM selectors"
+```
+
+Or omit the message to open the **Interactive Feedback Box** supporting rich multiline input:
+
+```bash
+automatiq feedback
+```
+
+* **Controls**:
+  * `Enter` inserts a new line.
+  * `Alt+Enter` (or `Escape` followed by `Enter`) submits your feedback.
+  * *Standard fallback*: If `prompt_toolkit` is not installed, it falls back to a line-by-line input box (press `Ctrl+D` or `Ctrl+Z` on a new line to submit).
+
+This sends your message (along with OS/version info) to the telemetry endpoint. No account or GitHub login required.
+
 ## Sponsor
 
 <a href="https://go.nodemaven.com/automatiq">
@@ -192,6 +212,7 @@ Precedence: `--no-proxy` > `--proxy URL` > `provider` > `server`. If the provide
 | `--proxy URL` | Route the recording browser through a proxy (`record` and `run` only) |
 | `--no-proxy` | Force a direct connection, overriding config (`record` and `run` only) |
 | `--no-banner` | Skip the startup animation |
+| `--no-telemetry` | Disable anonymous usage telemetry for this run |
 | `--verbose` | Show detailed diagnostic output |
 | `-V`, `--version` | Show version |
 | `-h`, `--help` | Show help message |
@@ -220,9 +241,43 @@ max_frames_per_prompt = 8
 # enabled  = false
 # server   = "http://user:pass@host:3128"
 # provider = "myproxies:rotate"   # dynamic "module:callable" for rotating proxies
+
+[telemetry]
+enabled = true
+# endpoint = "https://api.automatiq.run/v1/telemetry"   # change only if self-hosting
 ```
 
 *Priority order: **CLI flag** > `~/.automatiq/config.toml` > built-in defaults.*
+
+## Privacy & Telemetry
+
+AutomatiQ collects **anonymous usage-volume telemetry** to help detect crashes, understand feature adoption, and improve the tool. Telemetry is **enabled by default** (opt-out).
+
+**What we collect:**
+- OS, Python version, AutomatiQ version
+- Which command was run (`record`, `agent`, `run`, `resume`, `feedback`)
+- Session duration, step counts, token usage, cell executions
+- Recording metrics (request counts, WebSocket frames, browser used)
+- Error types (exception class and module — **not** full stack traces)
+- Session outcome (success, abandoned, step-limit-reached, crash)
+
+**What we NEVER collect:**
+- No URLs, domains, or file paths
+- No generated code or IPython cell contents
+- No prompts, LLM responses, or shell output
+- No persistent identifiers — a random `run_id` is generated in memory per run and discarded when the process exits
+- No IP addresses are stored client-side (server-side handling is your responsibility if self-hosting)
+
+**Opting out:**
+
+```bash
+# Per-run: pass the flag
+automatiq --no-telemetry run https://example.com
+
+# Permanent: edit ~/.automatiq/config.toml
+[telemetry]
+enabled = false
+```
 
 ## Development
 
