@@ -338,6 +338,7 @@ class TestFindBraveExecutable:
         monkeypatch.setattr("automatiq.core.browser_manager.config.BROWSER_EXECUTABLE_PATH", None)
 
         from automatiq.core.browser_manager import _ASSET_MAP, _detect_platform
+
         os_name, arch = _detect_platform()
         exe_rel = _ASSET_MAP[(os_name, arch)][1]
 
@@ -365,6 +366,7 @@ class TestFindBraveExecutable:
         monkeypatch.setattr("automatiq.core.browser_manager.config.BROWSER_EXECUTABLE_PATH", None)
 
         from automatiq.core.browser_manager import _ASSET_MAP, _detect_platform
+
         os_name, arch = _detect_platform()
         exe_rel = _ASSET_MAP[(os_name, arch)][1]
 
