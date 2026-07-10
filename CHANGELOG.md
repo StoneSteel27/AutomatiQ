@@ -7,8 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.3.1] — 2026-07-10
 
+### Added
+- **Python 3.11+ Support Restored** — Restored full compatibility, dependency definitions, and documentation for Python 3.11+, reverting the previous Python 3.12 minimum baseline to maximize deployment accessibility.
+
 ### Fixed
-- **Cross-Platform Cache Tests** — Made `find_brave_executable` cache tests dynamically adapt to the active platform's executable filename naming convention (`brave-browser` on Linux, `Brave Browser.app...` on macOS), resolving a platform testing failure in the GitHub Actions runner environment.
+- **Cross-Platform Cache Tests** — Mock `find_brave_executable` and `_verify_macos_signature` tests now dynamically adapt to the active platform's binary naming and signature rules, preventing unit test failures on macOS GHA runners.
+
+### Changed
+- **GHA CI Runner Consolidation** — Restructured testing and linting pipelines to run entirely on high-performance `ubuntu-latest` instances, executing parallel matrix testing against Python 3.11, 3.12, and 3.13.
 
 ## [0.3.0] — 2026-07-10
 
