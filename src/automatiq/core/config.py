@@ -10,12 +10,14 @@ Import this module from anywhere in the project:
 Priority chain:  CLI flag  >  ~/.automatiq/config.toml  >  hardcoded default
 """
 
+import json
+import re
 import tomllib
 from pathlib import Path
 
 from dotenv import load_dotenv
 
-VERSION = "0.2.2"
+VERSION = "0.3.0a1"
 
 # ── Persistent user-level directory (~/.automatiq/) ──────────────────────────
 # Stores binaries, logs, history, and user preferences across sessions.
@@ -25,6 +27,27 @@ BROWSERS_DIR = HOME_DIR / "browsers"
 LOGS_DIR = HOME_DIR / "logs"
 HISTORY_DIR = HOME_DIR / "history"
 CONFIG_FILE = HOME_DIR / "config.toml"
+STATE_FILE = HOME_DIR / "state.json"
+
+
+def load_state() -> dict:
+    """Load persistent state from state.json."""
+    if not STATE_FILE.exists():
+        return {}
+    try:
+        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_state(state: dict) -> None:
+    """Save persistent state to state.json."""
+    try:
+        HOME_DIR.mkdir(parents=True, exist_ok=True)
+        STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
 
 # ── Per-project paths (CWD-relative) ────────────────────────────────────────
 # .env is loaded from whichever directory the user runs `automatiq` in.
@@ -86,6 +109,18 @@ BANNER_ENABLED = True
 BANNER_SPEED = 1.0
 
 VERBOSE = False
+
+# ── Telemetry ────────────────────────────────────────────────────────────────
+# Anonymous usage-volume telemetry.  Collects OS, version, command, session
+# duration, token counts, and error types — never URLs, code, or persistent IDs.
+TELEMETRY_ENABLED = True
+TELEMETRY_ENDPOINT = "https://api.automatiq.run/v1/telemetry"
+
+# Set to True only on the very first run (config.toml did not exist yet).
+FIRST_RUN = False
+
+# Set to True if the telemetry warning notice should be displayed at startup.
+SHOW_TELEMETRY_NOTICE = False
 
 
 # ── Default config.toml content ─────────────────────────────────────────────
@@ -190,7 +225,163 @@ enabled  = false
 # and AUTOMATIQ40 (40% off ISP/Static) are available for AutomatiQ users.
 #
 # provider = "myproxies:rotate"
+
+[telemetry]
+# Anonymous usage-volume telemetry.
+# AutomatiQ collects anonymous metrics (OS, version, command used, session
+# duration, token counts, error types) to help improve the tool.
+# No URLs, code, personal data, or persistent identifiers are ever collected.
+# Set to false to opt out.
+enabled = true
+
+# Endpoint URL. Change this only if you run your own telemetry server.
+# endpoint = "https://api.automatiq.run/v1/telemetry"
 """
+
+
+# ── Config schema migration ──────────────────────────────────────────────────
+
+
+def _parse_toml_sections_and_keys(toml_text: str):
+    """Parses a TOML string to group keys with their preceding comments by section."""
+    sections = {}
+    current_section = None
+    accumulated_comments = []
+
+    section_pat = re.compile(r"^\s*\[([a-zA-Z0-9_-]+)\]\s*(?:#.*)?$")
+    key_val_pat = re.compile(r"^\s*(#?)\s*([a-zA-Z0-9_-]+)\s*=\s*(.*)$")
+
+    for line in toml_text.splitlines():
+        stripped = line.strip()
+
+        m_sec = section_pat.match(stripped)
+        if m_sec:
+            current_section = m_sec.group(1)
+            sections[current_section] = {}
+            accumulated_comments = []
+            continue
+
+        if current_section is None:
+            continue
+
+        m_key = key_val_pat.match(stripped)
+        if m_key:
+            key_name = m_key.group(2)
+            is_commented = bool(m_key.group(1))
+            block_lines = accumulated_comments + [line]
+            sections[current_section][key_name] = {
+                "lines": block_lines,
+                "commented": is_commented,
+            }
+            accumulated_comments = []
+        elif stripped.startswith("#"):
+            accumulated_comments.append(line)
+        elif not stripped:
+            accumulated_comments = []  # reset so comments don't span far apart
+
+    return sections
+
+
+def _get_existing_sections_and_keys(toml_text: str):
+    """Scans user TOML to find active/commented keys present in each section."""
+    sections = {}
+    current_section = None
+
+    section_pat = re.compile(r"^\s*\[([a-zA-Z0-9_-]+)\]\s*(?:#.*)?$")
+    key_val_pat = re.compile(r"^\s*(#?)\s*([a-zA-Z0-9_-]+)\s*=\s*(.*)$")
+
+    for line in toml_text.splitlines():
+        stripped = line.strip()
+        m_sec = section_pat.match(stripped)
+        if m_sec:
+            current_section = m_sec.group(1)
+            sections[current_section] = set()
+            continue
+
+        if current_section is None:
+            continue
+
+        m_key = key_val_pat.match(stripped)
+        if m_key:
+            sections[current_section].add(m_key.group(2))
+
+    return sections
+
+
+def _ensure_latest_schema() -> None:
+    """Intelligently merges missing keys and sections into the user's config.toml.
+
+    Creates a .bak file of config.toml before making any changes.
+    """
+    try:
+        user_text = CONFIG_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return
+
+    default_schema = _parse_toml_sections_and_keys(_DEFAULT_CONFIG_TOML)
+    user_schema = _get_existing_sections_and_keys(user_text)
+    user_lines = user_text.splitlines()
+
+    section_pat = re.compile(r"^\s*\[([a-zA-Z0-9_-]+)\]\s*(?:#.*)?$")
+    modified = False
+
+    for section_name, default_keys in default_schema.items():
+        # Case A: Entire section is missing
+        if section_name not in user_schema:
+            section_block_lines = [f"\n[{section_name}]"]
+            for _key_name, key_info in default_keys.items():
+                section_block_lines.extend(key_info["lines"])
+            user_lines.extend(section_block_lines)
+            modified = True
+            continue
+
+        # Case B: Section exists but check for missing keys
+        user_keys = user_schema[section_name]
+        missing_keys = [k for k in default_keys if k not in user_keys]
+        if not missing_keys:
+            continue
+
+        # Find where this section starts & ends in user_lines
+        start_idx = -1
+        for idx, line in enumerate(user_lines):
+            m = section_pat.match(line.strip())
+            if m and m.group(1) == section_name:
+                start_idx = idx
+                break
+
+        if start_idx == -1:
+            continue
+
+        end_idx = len(user_lines)
+        for idx in range(start_idx + 1, len(user_lines)):
+            m = section_pat.match(user_lines[idx].strip())
+            if m:
+                end_idx = idx
+                break
+
+        # Insert missing keys at the end of the section
+        insert_lines = []
+        for key_name in missing_keys:
+            key_info = default_keys[key_name]
+            insert_lines.append("")  # Spacer
+            insert_lines.extend(key_info["lines"])
+
+        user_lines[end_idx:end_idx] = insert_lines
+        modified = True
+
+    if modified:
+        try:
+            # Create a backup of the original config before writing updates
+            backup_file = CONFIG_FILE.with_suffix(".toml.bak")
+            backup_file.write_text(user_text, encoding="utf-8")
+        except OSError:
+            pass
+
+        try:
+            updated_text = "\n".join(user_lines) + ("\n" if user_text.endswith("\n") else "")
+            CONFIG_FILE.write_text(updated_text, encoding="utf-8")
+        except OSError:
+            pass
 
 
 # ── TOML loader ─────────────────────────────────────────────────────────────
@@ -200,6 +391,7 @@ def _load_config_toml():
     """Read ~/.automatiq/config.toml and apply values to module globals.
 
     Creates the file with commented defaults on first run.
+    Migrates missing sections on upgrade.
     Silently skips if the file is missing or unparseable.
     """
     global AGENT_MODEL, RECORDER_AI_MODEL, API_BASE
@@ -209,14 +401,19 @@ def _load_config_toml():
     global BANNER_ENABLED, BANNER_SPEED
     global BROWSER_TYPE, BROWSER_CHANNEL, BROWSER_EXECUTABLE_PATH
     global OUTPUT_DIR, WORKSPACE_DIR, BLOCKLIST_DIR, BLOCKLIST_DB
+    global TELEMETRY_ENABLED, TELEMETRY_ENDPOINT, FIRST_RUN
 
     if not CONFIG_FILE.exists():
         try:
             HOME_DIR.mkdir(parents=True, exist_ok=True)
             CONFIG_FILE.write_text(_DEFAULT_CONFIG_TOML, encoding="utf-8")
+            FIRST_RUN = True
         except OSError:
             pass
         return
+
+    # Migrate: append any missing sections (e.g. [telemetry]) to old configs.
+    _ensure_latest_schema()
 
     try:
         with open(CONFIG_FILE, "rb") as f:
@@ -284,8 +481,17 @@ def _load_config_toml():
         BLOCKLIST_DIR = OUTPUT_DIR / "blocklist"
         BLOCKLIST_DB = OUTPUT_DIR / "blocklist.db"
 
+    # [telemetry]
+    telemetry = data.get("telemetry", {})
+    if "enabled" in telemetry:
+        TELEMETRY_ENABLED = bool(telemetry["enabled"])
+    if "endpoint" in telemetry:
+        TELEMETRY_ENDPOINT = str(telemetry["endpoint"]) or TELEMETRY_ENDPOINT
+
 
 _load_config_toml()
+
+SHOW_TELEMETRY_NOTICE = TELEMETRY_ENABLED and not load_state().get("telemetry_notice_shown", False)
 
 
 def ensure_system_dirs():

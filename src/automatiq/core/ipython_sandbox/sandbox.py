@@ -5,6 +5,7 @@ import queue
 import re
 import threading
 import time
+from typing import Any
 
 from .utils import format_output, hard_kill_process, interrupt_process, parse_offset
 from .worker import ipython_worker
@@ -33,6 +34,10 @@ class AgentSandbox:
         self._cancel_flag = threading.Event()
         self._cancel_result: str | None = None
         self._closed = False
+
+        # Telemetry: set after each execute() call to report sandbox-level
+        # errors (soft timeout, hard timeout, worker crash).  None on success.
+        self.last_error_info: dict[str, Any] | None = None
 
         self.start_process()
 
@@ -167,6 +172,7 @@ class AgentSandbox:
                     status, code_exit, ret_val = "error", 1, "CancelledByUser"
                     timeout_msg = "\n[Execution interrupted by user. State preserved.]"
                     self._cancel_result = "preserved"
+                self.last_error_info = None
 
             elif self._cancel_flag.is_set():
                 try:
@@ -183,6 +189,12 @@ class AgentSandbox:
 
             else:
                 logger.warning(f"Soft Timeout ({timeout}s) reached for {cell_id}. Sending interrupt...")
+                self.last_error_info = {
+                    "exception_class": "SandboxSoftTimeout",
+                    "message": f"Cell execution exceeded {timeout}s timeout. Interrupted, state preserved.",
+                    "line": 189,
+                    "file": "sandbox.py",
+                }
                 interrupt_process(self.process, self.interrupt_event)
                 try:
                     res = self.result_queue.get(timeout=1.5)
@@ -190,12 +202,24 @@ class AgentSandbox:
                     timeout_msg = "\n[TIMEOUT: Execution interrupted. State preserved.]"
                 except queue.Empty:
                     logger.error(f"Hard Timeout reached for {cell_id}. Process unresponsive. Hard killing...")
+                    self.last_error_info = {
+                        "exception_class": "SandboxHardTimeout",
+                        "message": f"Cell unresponsive to interrupt after {timeout}s. Hard-killed, state lost.",
+                        "line": 199,
+                        "file": "sandbox.py",
+                    }
                     status, code_exit, ret_val = "error", 1, "HardTimeout"
                     fatal_timeout = True
                     timeout_msg = "\n[FATAL TIMEOUT: Execution forcefully terminated. State lost.]"
                     self.start_process()
 
         except (EOFError, OSError, ValueError):
+            self.last_error_info = {
+                "exception_class": "SandboxWorkerCrash",
+                "message": "Worker process crashed unexpectedly (EOFError/OSError/ValueError).",
+                "line": 205,
+                "file": "sandbox.py",
+            }
             status, code_exit, ret_val = "error", 1, "Worker Process Crashed"
 
         finally:

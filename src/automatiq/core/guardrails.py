@@ -38,23 +38,19 @@ def check_final_script_bounce(current_mode: str, final_script_bounces: int, max_
     """Handle final script submission constraints."""
     if current_mode != "building":
         return True, (
-            "Hey, it seems you are trying to finish the script while not in building mode. "
-            "If stuck, or the output isn't working, switch to reading or testing mode "
-            "as you wish. We have only one True RULE: Truth and truth alone."
+            "SYSTEM: Final script submitted outside building mode. "
+            "Switch to reading or testing mode before attempting to finalise. "
+            "Rule: only submit the final script when in building mode."
         )
 
-    if (
-        final_script_bounces < max_bounces
-    ):  # Note: final_script_bounces has already been incremented before this check in main loop
+    # Note: final_script_bounces has already been incremented before this check in main loop
+    if final_script_bounces < max_bounces:
         return True, (
-            "Hi there, looks like you have created the final script. "
-            "I just came here to verify if you have actually tested it or not. "
-            "In case the script isn't running, don't worry, just go back to "
-            "reading mode or testing mode. They will take care of the validity. "
-            "If test and read modes actually say they can't find any way "
-            "to make this work, then you can yield before the user that you "
-            "can't find any solution by writing that in normal text and halting. "
-            "\nIf you have already tested it, then just submit it again."
+            "SYSTEM: Final script received but not yet verified. "
+            "Confirm you have tested it in testing mode. "
+            "If reading/testing mode cannot produce a working solution, "
+            "inform the user in plain text and halt. "
+            "Otherwise, resubmit once testing is complete."
         )
 
     return False, None

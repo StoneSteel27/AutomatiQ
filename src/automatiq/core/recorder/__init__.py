@@ -7,8 +7,12 @@ import asyncio
 import importlib
 import logging
 import os
+import sys
 import tempfile
+import time
 import urllib.request
+
+import mss
 
 from .. import config, events
 from ..cancel_standard import CancelToken, StopToken
@@ -18,6 +22,46 @@ from .compile.workspace import compile_workspace
 from .video_recorder import ActionVideoRecorder
 
 logger = logging.getLogger(__name__)
+
+
+def _check_macos_screen_permission() -> None:
+    """Warn on macOS if Screen Recording permission is not yet granted.
+
+    Performs a single-frame test grab with ``mss``. If the grab fails with
+    ``CGWindowListCreateImage() failed``, macOS is blocking screen capture and
+    the full video recording will also produce no output.
+
+    The warning is emitted immediately so the user can fix the permission before
+    the recording wastes time.
+    """
+    if sys.platform != "darwin":
+        return
+
+    try:
+        with mss.mss() as sct:
+            if not sct.monitors or len(sct.monitors) < 2:
+                return
+            sct.grab(sct.monitors[1])
+    except mss.exception.ScreenShotError as exc:
+        if "CGWindowListCreateImage" in str(exc):
+            events.log_warn.send(
+                "recorder",
+                text=(
+                    "⚠️  macOS Screen Recording permission is NOT enabled.\n\n"
+                    "AutomatiQ needs this to capture video of your browsing session.\n"
+                    "To fix:\n"
+                    "  1. Open System Settings > Privacy & Security > "
+                    "Screen & System Audio Recording\n"
+                    "  2. Enable the toggle for your terminal app "
+                    "(Terminal, iTerm2, VS Code, etc.)\n"
+                    "  3. Restart your terminal and try again\n\n"
+                    "Proceeding without video — the session will lack visual replay.\n"
+                ),
+            )
+        else:
+            events.log_debug.send("recorder", text=f"Screen permission check failed (unexpected): {exc}")
+    except Exception:
+        pass
 
 
 def _init_blocklist() -> BlocklistDB:
@@ -113,12 +157,34 @@ def run_recording(
     _video_recorder = ActionVideoRecorder(fps=config.FPS, output_path=temp_video_path)
     _browser_agent = BrowserAgent(blocklist=blocklist, proxy=proxy)
 
+    _check_macos_screen_permission()
+
     events.log_info.send("recorder", text="[RULE] STARTING RECORDER")
     events.log_info.send("recorder", text=f"Blocklist  : {blocklist.total_enabled_domains()} domains loaded")
     events.log_info.send("recorder", text=f"Proxy      : {proxy if proxy else 'direct (no proxy)'}")
 
+    # ── Fire recording_started telemetry ──────────────────────────────────
+    try:
+        from ..telemetry import RecordingStartedProps, client
+
+        _browser_for_telemetry = config.BROWSER_TYPE
+        if browser_resolution:
+            _browser_for_telemetry = browser_resolution[0]
+
+        client.track_recording_started(
+            RecordingStartedProps(
+                browser=str(_browser_for_telemetry),
+                proxy_enabled=proxy is not None,
+                blocklist_enabled=bool(config.BLOCKLIST_SOURCES),
+            )
+        )
+    except Exception:
+        pass
+
     temp_data_dir = None
     success = False
+    _record_start = time.monotonic()
+    _recording_error_source: str | None = None
 
     try:
         _video_recorder.start()
@@ -144,6 +210,7 @@ def run_recording(
         if stop_token:
             stop_token.stop()
     except Exception as exc:
+        _recording_error_source = "browser_crash"
         events.log_error.send("recorder", text=f"Recording session failed: {exc}")
         events.log_traceback.send("recorder")
     finally:
@@ -151,6 +218,7 @@ def run_recording(
         try:
             video_start_unix = _video_recorder.stop()
         except Exception as exc:
+            _recording_error_source = "video_error"
             events.log_error.send("recorder", text=f"Failed to stop video recorder: {exc}")
             events.log_traceback.send("recorder")
 
@@ -188,6 +256,7 @@ def run_recording(
                     stop_token=stop_token,
                 )
             except Exception as exc:
+                _recording_error_source = "compilation_error"
                 events.log_error.send("recorder", text=f"Workspace compilation raised unexpectedly: {exc}")
                 events.log_traceback.send("recorder")
                 success = False
@@ -196,5 +265,32 @@ def run_recording(
                 events.log_info.send("recorder", text=f"Full recording saved to {final_video_path}")
         else:
             events.log_warn.send("recorder", text="Session data or video timestamp missing. Skipping compilation.")
+
+        # ── Fire anonymous telemetry event ────────────────────────────────
+        try:
+            from ..telemetry import RecordingEndedProps, client
+
+            stats = _browser_agent.stats if _browser_agent else {}
+            browser_used = config.BROWSER_TYPE
+            if browser_resolution:
+                browser_used = browser_resolution[0]
+
+            client.track_recording_ended(
+                RecordingEndedProps(
+                    duration_seconds=round(time.monotonic() - _record_start, 1),
+                    total_http_requests=int(stats.get("total_requests", 0)),
+                    total_ws_connections=int(stats.get("ws_connections", 0)),
+                    total_ws_frames=int(stats.get("ws_frames_sent", 0) + stats.get("ws_frames_received", 0)),
+                    browser_used=str(browser_used),
+                    proxy_enabled=proxy is not None,
+                    has_ai_analysis=success,
+                    crash_reason=(
+                        _recording_error_source
+                        or ("browser_crash" if getattr(_browser_agent, "session_crashed", False) else None)
+                    ),
+                )
+            )
+        except Exception:
+            pass
 
     return success

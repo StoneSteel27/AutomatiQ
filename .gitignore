@@ -37,6 +37,8 @@ nul
 
 .jailed_bin/
 
+# Telemetry server (deployed separately to VPS, not part of client package)
+server/
 
 test_cancel*.py
 test_interrupt*.py

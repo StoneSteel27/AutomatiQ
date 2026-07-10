@@ -235,6 +235,8 @@ def _apply_config_overrides(args):
         config.API_BASE = args.base_url
     if getattr(args, "no_banner", False):
         config.BANNER_ENABLED = False
+    if getattr(args, "no_telemetry", False):
+        config.TELEMETRY_ENABLED = False
     if getattr(args, "verbose", False):
         config.VERBOSE = True
     if getattr(args, "browser", None):
@@ -286,7 +288,7 @@ def _browser_progress_callback():
 
 def _confirm_brave_download(question: str) -> bool:
     """Ask the user whether to download Brave. Defaults to yes on Enter."""
-    from .cli.console import console
+    from .cli.console import console, prompt_yes_no
 
     try:
         # Pause any active listener so keystrokes go to the prompt.
@@ -307,18 +309,12 @@ def _confirm_brave_download(question: str) -> bool:
                 "is noticed by anti-bot defenses."
             )
             console.print()
-            ans = (
-                console.input("[bold cyan]Download a portable Brave copy now? (~300 MB) [Y/n] [/bold cyan]")
-                .strip()
-                .lower()
-            )
+            return prompt_yes_no("Download a portable Brave copy now? (~300 MB)", default=True)
         finally:
             if _active_listener:
                 _active_listener.resume()
     except Exception:
-        # If anything goes wrong with the prompt, default to yes (download).
         return True
-    return ans in ("", "y", "yes")
 
 
 def _resolve_browser_for_recording(args) -> tuple[str, object | None, str]:
@@ -645,6 +641,59 @@ def cmd_run(args):
             monitor.clear()
 
 
+def cmd_feedback(args):
+    """`automatiq feedback ["message"]` — send anonymous feedback to the maintainers."""
+    _apply_config_overrides(args)
+    from .cli.console import console, info
+
+    message = args.message.strip() if args.message else ""
+    if not message:
+        console.print("[bold blue]Anonymous Feedback Box[/bold blue]")
+        console.print("Your feedback helps make AutomatiQ better!")
+        console.print(
+            "[dim]Press [bold]Alt+Enter[/bold] (or [bold]Escape[/bold] then [bold]Enter[/bold]) to submit.[/dim]"
+        )
+        console.print("[dim]Press [bold]Enter[/bold] to start a new line.[/dim]\n")
+
+        try:
+            from prompt_toolkit import prompt as pt_prompt
+            from prompt_toolkit.formatted_text import HTML
+
+            message = pt_prompt(
+                HTML("<ansiblue><bold>Enter feedback below:</bold></ansiblue>\n"),
+                multiline=True,
+            )
+        except ImportError:
+            console.print("[yellow]prompt_toolkit not found. Standard multiline fallback active.[/yellow]")
+            console.print("[dim]Enter feedback (type Ctrl+Z or Ctrl+D on a new line to submit):[/dim]")
+            lines = []
+            while True:
+                try:
+                    line = input()
+                except EOFError:
+                    break
+                lines.append(line)
+            message = "\n".join(lines)
+
+        message = message.strip()
+        if not message:
+            error("Feedback message cannot be empty.")
+            sys.exit(1)
+
+    from .core.telemetry import client
+
+    client.start(command="feedback")
+    if not client.is_enabled:
+        info("Telemetry is disabled — feedback was not sent.")
+        info("Enable telemetry in ~/.automatiq/config.toml to submit feedback.")
+        sys.exit(0)
+
+    client.track_feedback(message)
+    client.flush_sync(timeout=3.0)
+    client.stop()
+    info("Thank you! Your feedback has been sent.")
+
+
 # ---------------------------------------------------------------------------
 # Custom Rich help page — replaces argparse's default --help output.
 # ---------------------------------------------------------------------------
@@ -679,6 +728,7 @@ def _print_rich_help():
     t.add_row("resume [name]", "Resume a previous agent session from history")
     t.add_row("run <url>", "Record a session then immediately launch the agent")
     t.add_row("setup brave", "Download a portable Brave browser (anti-fingerprinting for stealth)")
+    t.add_row('feedback "msg"', "Send anonymous feedback to the maintainers")
     console.print(t)
     console.print()
 
@@ -713,6 +763,7 @@ def _print_rich_help():
     t3.add_row("  recorder_proxy", "Recording browser proxy (HTTP/SOCKS) and dynamic providers")
     t3.add_row("  banner", "Startup animation toggle and speed")
     t3.add_row("  output", "Root directory for all generated output")
+    t3.add_row("  telemetry", "Anonymous usage-volume metrics (opt-out)")
     console.print(t3)
     console.print()
 
@@ -733,6 +784,7 @@ def _print_rich_help():
     t4.add_row("--browser TYPE", "Browser to use: chrome, brave, or auto (record/run only)")
     t4.add_row("--no-auto-download-browser", "Skip the Brave download prompt; use installed Chrome (record/run)")
     t4.add_row("--no-banner", "Skip the startup animation")
+    t4.add_row("--no-telemetry", "Disable anonymous usage telemetry for this run")
     t4.add_row("--verbose", "Show detailed diagnostic output")
     t4.add_row("-V, --version", "Show version")
     t4.add_row("-h, --help", "Show this help message")
@@ -838,6 +890,7 @@ def main():
         p.add_argument("--sandbox-timeout", type=int, metavar="SECONDS")
         p.add_argument("--output-dir", metavar="PATH")
         p.add_argument("--no-banner", action="store_true", default=False)
+        p.add_argument("--no-telemetry", action="store_true", default=False)
         p.add_argument("--verbose", action="store_true", default=False)
         p.add_argument("-h", "--help", action="store_true", default=False, dest="help_flag")
         p.add_argument("-V", "--version", action="store_true", default=False)
@@ -919,6 +972,17 @@ def main():
     # When `setup` is run without a sub-target, show help.
     p_setup.set_defaults(func=lambda a: (_print_rich_help(), sys.exit(0)))
 
+    p_feedback = subparsers.add_parser("feedback", add_help=False)
+    p_feedback.add_argument(
+        "message",
+        type=str,
+        nargs="?",
+        default=None,
+        help="Feedback message (optional, triggers interactive multiline prompt if omitted)",
+    )
+    _add_common_flags(p_feedback)
+    p_feedback.set_defaults(func=cmd_feedback)
+
     args = parser.parse_args()
 
     if getattr(args, "help_flag", False) or getattr(args, "version", False):
@@ -932,7 +996,39 @@ def main():
         _print_rich_help()
         sys.exit(0)
 
-    args.func(args)
+    # ── First-run telemetry notice ────────────────────────────────────────
+    if config.SHOW_TELEMETRY_NOTICE and config.TELEMETRY_ENABLED:
+        from .cli.console import console
+
+        console.print()
+        console.print(
+            "[bold blue]Privacy & Telemetry Notice[/bold blue]\n"
+            "[dim]AutomatiQ collects anonymous usage telemetry by default to help improve stability and performance.\n"
+            "We adhere to a strict Zero-Identity privacy model:[/dim]\n"
+            "[dim]  • [bold]Collected[/bold]: OS, python version, active command keyword (e.g., 'record', 'run'),\n"
+            "    session duration, and generic exception class names (e.g., 'TimeoutError').[/dim]\n"
+            "[dim]  • [bold]NEVER Collected[/bold]: URLs, custom code, local file paths, traceback logs, full terminal\n"
+            "    arguments, cookies, credentials, or persistent host/IP identifiers.[/dim]\n"
+            "[dim]To opt out, run with [bold]--no-telemetry[/bold] or disable it in\n"
+            "    [bold]~/.automatiq/config.toml[/bold].[/dim]"
+        )
+        console.print()
+
+        try:
+            state = config.load_state()
+            state["telemetry_notice_shown"] = True
+            config.save_state(state)
+        except Exception:
+            pass
+
+    # ── Telemetry lifecycle ───────────────────────────────────────────────
+    from .core.telemetry import client
+
+    client.start(command=args.command)
+    try:
+        args.func(args)
+    finally:
+        client.stop()
 
 
 if __name__ == "__main__":

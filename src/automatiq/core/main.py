@@ -8,6 +8,7 @@ import queue
 import re
 import sys
 import time
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 
@@ -51,8 +52,34 @@ litellm.drop_params = True
 _preloaded_sandbox = None
 
 # -----------------
+# CONSTANTS
+# -----------------
+
+MAX_FINAL_SCRIPT_BOUNCES = 1
+MAX_VALIDATION_RETRIES = 3
+MAX_LLM_RETRIES = 5
+BASE_BACKOFF = 10
+
+# -----------------
 # LIFECYCLE & HELPERS
 # -----------------
+
+
+def _meta_get(meta: dict | None, key: str, default=0):
+    """Safely retrieve a value from optional session metadata."""
+    return meta.get(key, default) if meta else default
+
+
+def _interruptible_sleep(seconds: int, cancel_token) -> bool:
+    """Sleep for *seconds*, checking cancel_token each second.
+
+    Returns True if cancelled before the full duration elapsed.
+    """
+    for _ in range(seconds):
+        if cancel_token.is_cancelled():
+            return True
+        time.sleep(1)
+    return False
 
 
 @events.preload_start.connect
@@ -195,15 +222,14 @@ def run_agent(
         saved_meta = load_session_metadata(history_dir)
 
         # Restore critical state from metadata (defaults for legacy sessions)
-        current_mode = saved_meta.get("current_mode", "reading") if saved_meta else "reading"
+        current_mode = _meta_get(saved_meta, "current_mode", "reading")
 
         # Reconstruct exec_history from messages
         exec_history = _reconstruct_exec_history(messages)
 
         # cell_counter must be at least len(exec_history) so new cells don't
         # collide with restored Cell_1..Cell_N in output_cache
-        saved_cell_counter = saved_meta.get("cell_counter", 0) if saved_meta else 0
-        cell_counter = max(saved_cell_counter, len(exec_history))
+        cell_counter = max(_meta_get(saved_meta, "cell_counter"), len(exec_history))
 
         # Derive recording session dir from history folder name
         recording_name = extract_recording_name(history_dir.name)
@@ -220,7 +246,7 @@ def run_agent(
             sys.exit(1)
 
         # Preserve session start time from metadata
-        session_started = saved_meta.get("session_started") if saved_meta else None
+        session_started = _meta_get(saved_meta, "session_started", None)
     else:
         # ── Fresh start path ─────────────────────────────────────────────────
         session_dump = find_latest_session_dir(target)
@@ -287,11 +313,11 @@ def run_agent(
     # ── Session metadata accumulator ────────────────────────────────────────
     _session_meta: dict = {
         "model": config.AGENT_MODEL,
-        "llm_calls": saved_meta.get("llm_calls", 0) if saved_meta else 0,
-        "cells_executed": saved_meta.get("cells_executed", 0) if saved_meta else 0,
-        "prompt_tokens": saved_meta.get("prompt_tokens", 0) if saved_meta else 0,
-        "completion_tokens": saved_meta.get("completion_tokens", 0) if saved_meta else 0,
-        "total_tokens": saved_meta.get("total_tokens", 0) if saved_meta else 0,
+        "llm_calls": _meta_get(saved_meta, "llm_calls"),
+        "cells_executed": _meta_get(saved_meta, "cells_executed"),
+        "prompt_tokens": _meta_get(saved_meta, "prompt_tokens"),
+        "completion_tokens": _meta_get(saved_meta, "completion_tokens"),
+        "total_tokens": _meta_get(saved_meta, "total_tokens"),
         "session_started": session_started or datetime.now().isoformat(timespec="seconds"),
         "current_mode": current_mode,
         "cell_counter": cell_counter,
@@ -304,18 +330,101 @@ def run_agent(
     scr = ""
     mode_switch_notification = ""
     final_script_bounces = 0
-    MAX_FINAL_SCRIPT_BOUNCES = 1
-    MAX_VALIDATION_RETRIES = 3
-
     consecutive_validation_failures = 0
     prev_description = ""
-    MAX_LLM_RETRIES = 5
-    BASE_BACKOFF = 10
-
     consecutive_autonomous_turns = 0
+
+    # ── Telemetry tracking ─────────────────────────────────────────────────
+    try:
+        from .telemetry import HEARTBEAT_INTERVAL as _hb_interval
+    except Exception:
+        _hb_interval = 300
+
+    _session_outcome = "abandoned_by_user"
+    _guardrail_counts: dict[str, int] = {
+        "duplicate_thought": 0,
+        "repeated_execution": 0,
+        "final_script_bounce": 0,
+        "step_limit": 0,
+        "validation_bailout": 0,
+    }
+    _session_errors: list = []
+    _total_steps = 0
+    _current_phase = "init"
+    _last_heartbeat_time = time.monotonic()
+    _final_scripts_submitted = 0
+    _step_limit_reached = False
+    _crash_step: int | None = None
+    _crash_cell: int | None = None
+    _crash_phase: str | None = None
+
+    # ── Fire agent_started telemetry ──────────────────────────────────────
+    with suppress(Exception):
+        from .telemetry import AgentStartedProps, client
+
+        client.track_agent_started(
+            AgentStartedProps(
+                model=config.AGENT_MODEL,
+                session_type="resume" if resume_from else "fresh",
+                proxy_enabled=bool(config.RECORDER_PROXY_ENABLED),
+                max_steps=config.MAX_AGENT_STEPS,
+            )
+        )
+
+    # ── Error-tracking helpers (closures over _session_errors / counters) ──
+    def _track_exc(exc: BaseException) -> None:
+        """Append a real exception to _session_errors for telemetry."""
+        try:
+            from .telemetry import make_error_from_exc
+
+            _session_errors.append(
+                make_error_from_exc(exc, _current_phase, _total_steps, int(_session_meta.get("cells_executed", 0)))
+            )
+        except Exception:
+            pass
+
+    def _track_synthetic_err(exception_class: str, message: str, line: int, file: str) -> None:
+        """Append a synthetic error (no exception object) to _session_errors."""
+        try:
+            from .telemetry import make_error_props
+
+            _session_errors.append(
+                make_error_props(
+                    exception_class,
+                    message,
+                    line,
+                    file,
+                    _current_phase,
+                    _total_steps,
+                    int(_session_meta.get("cells_executed", 0)),
+                )
+            )
+        except Exception:
+            pass
 
     try:
         while True:
+            # ── Periodic heartbeat telemetry ───────────────────────────────
+            if time.monotonic() - _last_heartbeat_time >= _hb_interval:
+                _last_heartbeat_time = time.monotonic()
+                with suppress(Exception):
+                    from .telemetry import AgentHeartbeatProps, client
+
+                    started_dt = datetime.fromisoformat(_session_meta["session_started"])
+                    _hb_duration = (datetime.now() - started_dt).total_seconds()
+                    client.track_agent_heartbeat(
+                        AgentHeartbeatProps(
+                            step=_total_steps,
+                            cell=int(_session_meta.get("cells_executed", 0)),
+                            duration_seconds=_hb_duration,
+                            current_mode=current_mode,
+                            current_phase=_current_phase,
+                            final_scripts_submitted=_final_scripts_submitted,
+                            guardrails=dict(_guardrail_counts),
+                            errors=list(_session_errors),
+                        )
+                    )
+
             if stop_token and stop_token.is_stopped():
                 raise StopRequestedException("Aborted via stop token")
 
@@ -344,6 +453,8 @@ def run_agent(
 
             if not needs_user_input:
                 if consecutive_autonomous_turns >= config.MAX_AGENT_STEPS:
+                    _guardrail_counts["step_limit"] += 1
+                    _step_limit_reached = True
                     events.log_warn.send(
                         "core",
                         text=f"Paused: Agent hit {config.MAX_AGENT_STEPS} consecutive turns without completing task.",
@@ -361,6 +472,7 @@ def run_agent(
                     needs_user_input = True
                     continue
                 consecutive_autonomous_turns += 1
+                _total_steps += 1
 
             if needs_user_input:
                 events.prompt_request_start.send("core")
@@ -388,6 +500,7 @@ def run_agent(
             content = ""
             usage = None
             aborted = False
+            _current_phase = "llm_call"
             for attempt in range(1, MAX_LLM_RETRIES + 1):
                 try:
                     events.llm_request_start.send("core")
@@ -470,6 +583,7 @@ def run_agent(
                     break
                 except NotFoundError as exc:
                     msg = extract_message(exc)
+                    _track_exc(exc)
                     events.log_error.send(
                         "core",
                         text=(
@@ -487,20 +601,14 @@ def run_agent(
                     APIError,
                 ) as exc:
                     msg = extract_message(exc)
+                    _track_exc(exc)
                     wait = BASE_BACKOFF * (2 ** (attempt - 1))
                     events.log_warn.send("core", text=f"LLM call failed (attempt {attempt}/{MAX_LLM_RETRIES}): {msg}")
                     events.log_traceback.send("core")
                     if attempt < MAX_LLM_RETRIES:
                         events.log_warn.send("core", text=f"Retrying in {wait}s ...")
                         events.wait_start.send("core", seconds=wait, reason="Retrying")
-
-                        cancelled = False
-                        for _ in range(wait):
-                            if cancel_token.is_cancelled():
-                                cancelled = True
-                                break
-                            time.sleep(1)
-                        if cancelled:
+                        if _interruptible_sleep(wait, cancel_token):
                             cancel_token.reset()
                             events.log_info.send("core", text="Cancelled by token. Returning to prompt.")
                             events.operation_cancelled.send("core")
@@ -524,19 +632,23 @@ def run_agent(
 
             tool_call = tool_calls[0]
             tool_name = tool_call["function"]["name"]
+            _current_phase = "tool_execution"
             try:
                 tool_args = json.loads(tool_call["function"]["arguments"])
             except json.JSONDecodeError as exc:
                 tool_args = {}
                 validation_error = f"Invalid JSON arguments: {exc}"
+                _track_exc(exc)
             else:
                 validation_error = validate_tool_args(tool_name, tool_args)
 
             if validation_error:
                 consecutive_validation_failures += 1
+                _track_synthetic_err("ToolValidationError", validation_error, 560, "main.py")
                 messages.append(assistant_msg)
 
                 if consecutive_validation_failures >= MAX_VALIDATION_RETRIES:
+                    _guardrail_counts["validation_bailout"] += 1
                     events.log_error.send(
                         "core", text=f"Tool validation failed {MAX_VALIDATION_RETRIES} times. Bailing out."
                     )
@@ -568,6 +680,7 @@ def run_agent(
             current_description = tool_args.get("description", "").strip() if tool_name == "execute_ipython" else ""
             duplicate_warning = check_duplicate_thought(current_description, prev_description)
             if duplicate_warning:
+                _guardrail_counts["duplicate_thought"] += 1
                 events.log_warn.send("core", text="Exact duplicate description detected.")
                 messages.append(assistant_msg)
                 messages.append(
@@ -595,6 +708,7 @@ def run_agent(
                     current_mode, final_script_bounces, MAX_FINAL_SCRIPT_BOUNCES
                 )
                 if should_bounce:
+                    _guardrail_counts["final_script_bounce"] += 1
                     events.log_warn.send(
                         "core",
                         text="Final script submitted outside building mode (or verification needed) — bouncing back.",
@@ -610,6 +724,21 @@ def run_agent(
                     continue
 
                 events.log_info.send("core", text="Agent submitted the final script.")
+                _session_outcome = "success"
+                _final_scripts_submitted += 1
+                with suppress(Exception):
+                    from .telemetry import FinalScriptSubmittedProps, client
+
+                    started_dt = datetime.fromisoformat(_session_meta["session_started"])
+                    _fs_duration = (datetime.now() - started_dt).total_seconds()
+                    client.track_final_script_submitted(
+                        FinalScriptSubmittedProps(
+                            step=_total_steps,
+                            cell=int(_session_meta.get("cells_executed", 0)),
+                            duration_seconds=_fs_duration,
+                            total_tokens=int(_session_meta.get("total_tokens", 0)),
+                        )
+                    )
                 events.tool_message.send("core", text=f"\n--- FINAL SCRIPT ---\n\n{script_content}\n")
                 messages.append(
                     {
@@ -637,6 +766,7 @@ def run_agent(
 
                 is_repeated, repeat_warning = check_repeated_execution(display_script, exec_history)
                 if is_repeated:
+                    _guardrail_counts["repeated_execution"] += 1
                     events.log_warn.send("core", text="Blocked: exact script ran multiple times.")
                     messages.append(
                         {
@@ -650,6 +780,7 @@ def run_agent(
 
                 try:
                     events.code_exec_start.send("core", script=display_script)
+                    _current_phase = "sandbox_execution"
                     if script_to_run.strip() == "%restore":
                         sandbox.progress_callback = lambda cur, tot: events.restore_progress.send(
                             "core", current=cur, total=tot
@@ -675,6 +806,15 @@ def run_agent(
                     )
                     needs_user_input = True
                     continue
+
+                # ── Check sandbox-level errors for telemetry ──────────────────
+                if sandbox.last_error_info:
+                    _track_synthetic_err(
+                        sandbox.last_error_info["exception_class"],
+                        sandbox.last_error_info["message"],
+                        sandbox.last_error_info["line"],
+                        sandbox.last_error_info["file"],
+                    )
 
                 output_match_cell = None
                 for _prev_script, prev_output, prev_cell in exec_history:
@@ -714,7 +854,21 @@ def run_agent(
                 context_memo = tool_args.get("context", "")
                 events.mode_switch.send("core", mode=target_mode)
 
+                _prev_mode = current_mode
                 current_mode = target_mode
+
+                with suppress(Exception):
+                    from .telemetry import ModeSwitchedProps, client
+
+                    client.track_mode_switched(
+                        ModeSwitchedProps(
+                            from_mode=_prev_mode,
+                            to_mode=target_mode,
+                            step=_total_steps,
+                            cell=int(_session_meta.get("cells_executed", 0)),
+                        )
+                    )
+
                 mode_injection = MODE_INJECTIONS.get(target_mode, "")
 
                 messages.append(
@@ -739,9 +893,32 @@ def run_agent(
         events.log_info.send("core", text="Agent loop stopped by user.")
         sandbox.cancel()
     except Exception as exc:
+        _session_outcome = "crash"
+        _crash_step = _total_steps
+        _crash_cell = int(_session_meta.get("cells_executed", 0))
+        _crash_phase = _current_phase
+        _track_exc(exc)
         events.log_error.send("core", text=f"Unexpected error: {exc}")
         events.log_traceback.send("core")
         sandbox.cancel()
+        with suppress(Exception):
+            from .telemetry import SystemCrashProps, _extract_error_location, _sanitize_message, client
+
+            _crash_line, _crash_file = _extract_error_location(exc)
+            client.track_system_crash(
+                SystemCrashProps(
+                    crash_type="unhandled_exception",
+                    exception_class=type(exc).__name__,
+                    message=_sanitize_message(str(exc)),
+                    line=_crash_line,
+                    file=_crash_file,
+                    module=type(exc).__module__,
+                    active_command=client.active_command,
+                    step=_crash_step,
+                    cell=_crash_cell,
+                    phase=_crash_phase,
+                )
+            )
     finally:
         try:
             _session_meta["session_ended"] = datetime.now().isoformat(timespec="seconds")
@@ -768,4 +945,32 @@ def run_agent(
         except Exception as exc:
             events.log_error.send("core", text=f"Failed to save session logs: {exc}")
             events.log_traceback.send("core")
+
+        # ── Fire anonymous telemetry event ────────────────────────────────
+        with suppress(Exception):
+            from .telemetry import AgentSessionEndedProps, client
+
+            _final_outcome = _session_outcome
+            if _step_limit_reached and _final_outcome == "abandoned_by_user":
+                _final_outcome = "step_limit_reached"
+
+            client.track_agent_session_ended(
+                AgentSessionEndedProps(
+                    outcome=_final_outcome,
+                    model=config.AGENT_MODEL,
+                    total_tokens=int(_session_meta.get("total_tokens", 0)),
+                    prompt_tokens=int(_session_meta.get("prompt_tokens", 0)),
+                    completion_tokens=int(_session_meta.get("completion_tokens", 0)),
+                    steps_taken=_total_steps,
+                    cells_executed=int(_session_meta.get("cells_executed", 0)),
+                    duration_seconds=float(_session_meta.get("duration_seconds", 0)),
+                    proxy_enabled=bool(config.RECORDER_PROXY_ENABLED),
+                    guardrails=dict(_guardrail_counts),
+                    errors=list(_session_errors),
+                    crash_step=_crash_step,
+                    crash_cell=_crash_cell,
+                    crash_phase=_crash_phase,
+                )
+            )
+
         sandbox.close()

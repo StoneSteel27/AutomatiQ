@@ -254,19 +254,28 @@ def load_session_messages(history_dir: Path) -> list[dict]:
     yaml.safe_load parses JSON transparently, but we add an explicit json fallback
     for edge cases where libyaml's JSON parsing differs.
     """
+    path = history_dir / "messages_full.yaml"
+    messages, _ = _parse_session_file(path)
+    return messages
+
+
+def _parse_session_file(path: Path) -> tuple[list[dict], dict | None]:
+    """Parse messages_full.yaml and return (messages, metadata).
+
+    Handles JSON (new format), YAML dict (legacy), and bare-list (legacy) formats.
+    """
     import json
 
-    path = history_dir / "messages_full.yaml"
-    with open(path, encoding="utf-8") as f:
-        raw = f.read()
+    raw = path.read_text(encoding="utf-8")
     try:
         data = yaml.safe_load(raw)
     except Exception:
         data = json.loads(raw)
+
     if isinstance(data, list):
-        return data
+        return data, None
     if isinstance(data, dict) and "messages" in data:
-        return data["messages"]
+        return data["messages"], data.get("metadata")
     raise ValueError(f"Unexpected YAML structure in {path}: {type(data).__name__}")
 
 
@@ -278,11 +287,8 @@ def load_session_metadata(history_dir: Path) -> dict | None:
     path = history_dir / "messages_full.yaml"
     if not path.exists():
         return None
-    with open(path, encoding="utf-8") as f:
-        data = yaml.safe_load(f)
-    if isinstance(data, dict):
-        return data.get("metadata")
-    return None
+    _, metadata = _parse_session_file(path)
+    return metadata
 
 
 def extract_recording_name(folder_name: str) -> str:
@@ -293,20 +299,26 @@ def extract_recording_name(folder_name: str) -> str:
     return folder_name
 
 
+def _is_system_error_response(content: str) -> bool:
+    """Return True if the tool response content is a guardrail/validation error, not real output."""
+    return content.startswith(
+        (
+            "SYSTEM: Tool Validation Error",
+            "SYSTEM: Validation failed repeatedly",
+            "SYSTEM: You have submitted the exact same description",
+        )
+    )
+
+
 def _count_cells(messages: list[dict]) -> int:
     """Count real execute_ipython tool responses (excluding validation errors and duplicates)."""
-    count = 0
-    for msg in messages:
-        if msg.get("role") == "tool" and msg.get("name") == "execute_ipython":
-            content = str(msg.get("content", ""))
-            if (
-                content.startswith("SYSTEM: Tool Validation Error")
-                or content.startswith("SYSTEM: Validation failed repeatedly")
-                or content.startswith("SYSTEM: You have submitted the exact same description")
-            ):
-                continue
-            count += 1
-    return count
+    return sum(
+        1
+        for msg in messages
+        if msg.get("role") == "tool"
+        and msg.get("name") == "execute_ipython"
+        and not _is_system_error_response(str(msg.get("content", "")))
+    )
 
 
 def list_resumable_sessions() -> list[SessionInfo]:
