@@ -16,6 +16,7 @@ import litellm
 from litellm.exceptions import (
     APIConnectionError,
     APIError,
+    InternalServerError,
     NotFoundError,
     RateLimitError,
     ServiceUnavailableError,
@@ -59,6 +60,17 @@ MAX_FINAL_SCRIPT_BOUNCES = 1
 MAX_VALIDATION_RETRIES = 3
 MAX_LLM_RETRIES = 5
 BASE_BACKOFF = 10
+
+# Maps litellm provider prefix → the environment variable the user must set.
+_PROVIDER_KEY_MAP = {
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "google": "GEMINI_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "cohere": "COHERE_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+    "azure": "AZURE_API_KEY",
+}
 
 # -----------------
 # LIFECYCLE & HELPERS
@@ -593,6 +605,31 @@ def run_agent(
                     )
                     aborted = True
                     break
+                except InternalServerError as exc:
+                    msg = extract_message(exc)
+                    _track_exc(exc)
+                    if config.API_BASE:
+                        events.log_error.send(
+                            "core",
+                            text=(
+                                f"Unexpected credentials error with local endpoint ({config.API_BASE}). "
+                                f"This should have been handled automatically — please report this bug.\n"
+                                f"Details: {msg}"
+                            ),
+                        )
+                    else:
+                        provider = config.AGENT_MODEL.split("/")[0] if "/" in config.AGENT_MODEL else "provider"
+                        key_name = _PROVIDER_KEY_MAP.get(provider, f"{provider.upper().replace('-', '_')}_API_KEY")
+                        events.log_error.send(
+                            "core",
+                            text=(
+                                f"Missing API credentials for '{config.AGENT_MODEL}'.\n"
+                                f"Set {key_name} in your environment or ~/.automatiq/config.toml.\n"
+                                f"Details: {msg}"
+                            ),
+                        )
+                    aborted = True
+                    break
                 except (
                     RateLimitError,
                     ServiceUnavailableError,
@@ -630,264 +667,302 @@ def run_agent(
                 needs_user_input = True
                 continue
 
-            tool_call = tool_calls[0]
-            tool_name = tool_call["function"]["name"]
-            _current_phase = "tool_execution"
-            try:
-                tool_args = json.loads(tool_call["function"]["arguments"])
-            except json.JSONDecodeError as exc:
-                tool_args = {}
-                validation_error = f"Invalid JSON arguments: {exc}"
-                _track_exc(exc)
-            else:
-                validation_error = validate_tool_args(tool_name, tool_args)
-
-            if validation_error:
-                consecutive_validation_failures += 1
-                _track_synthetic_err("ToolValidationError", validation_error, 560, "main.py")
-                messages.append(assistant_msg)
-
-                if consecutive_validation_failures >= MAX_VALIDATION_RETRIES:
-                    _guardrail_counts["validation_bailout"] += 1
-                    events.log_error.send(
-                        "core", text=f"Tool validation failed {MAX_VALIDATION_RETRIES} times. Bailing out."
-                    )
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tool_call["id"],
-                            "name": tool_name,
-                            "content": f"SYSTEM: Validation failed repeatedly. Error: {validation_error}. Returning.",
-                        }
-                    )
-                    needs_user_input = True
-                    consecutive_validation_failures = 0
-                else:
-                    events.log_warn.send("core", text=f"Tool validation error: {validation_error}")
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tool_call["id"],
-                            "name": tool_name,
-                            "content": f"SYSTEM: Tool Validation Error: {validation_error}. Please try again.",
-                        }
-                    )
-                continue
-
-            consecutive_validation_failures = 0
-
-            # Deduplicate logic based on description
-            current_description = tool_args.get("description", "").strip() if tool_name == "execute_ipython" else ""
-            duplicate_warning = check_duplicate_thought(current_description, prev_description)
-            if duplicate_warning:
-                _guardrail_counts["duplicate_thought"] += 1
-                events.log_warn.send("core", text="Exact duplicate description detected.")
-                messages.append(assistant_msg)
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tool_call["id"],
-                        "name": tool_name,
-                        "content": duplicate_warning,
-                    }
-                )
-                continue
-
-            if tool_name == "execute_ipython":
-                prev_description = current_description
-
-            # Append the LLM's assistant message
+            # Append the assistant message ONCE before processing tool calls
             messages.append(assistant_msg)
 
-            # Process the specific tool
-            if tool_name == "final_submit":
-                script_content = tool_args.get("final_python_script", "")
+            # Process ALL tool calls (parallel execution support)
+            for tool_call in tool_calls:
+                tool_name = tool_call["function"]["name"]
+                _current_phase = "tool_execution"
+                validation_error = None
 
-                final_script_bounces += 1
-                should_bounce, bounce_message = check_final_script_bounce(
-                    current_mode, final_script_bounces, MAX_FINAL_SCRIPT_BOUNCES
-                )
-                if should_bounce:
-                    _guardrail_counts["final_script_bounce"] += 1
-                    events.log_warn.send(
-                        "core",
-                        text="Final script submitted outside building mode (or verification needed) — bouncing back.",
-                    )
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tool_call["id"],
-                            "name": tool_name,
-                            "content": bounce_message,
-                        }
-                    )
-                    continue
-
-                events.log_info.send("core", text="Agent submitted the final script.")
-                _session_outcome = "success"
-                _final_scripts_submitted += 1
-                with suppress(Exception):
-                    from .telemetry import FinalScriptSubmittedProps, client
-
-                    started_dt = datetime.fromisoformat(_session_meta["session_started"])
-                    _fs_duration = (datetime.now() - started_dt).total_seconds()
-                    client.track_final_script_submitted(
-                        FinalScriptSubmittedProps(
-                            step=_total_steps,
-                            cell=int(_session_meta.get("cells_executed", 0)),
-                            duration_seconds=_fs_duration,
-                            total_tokens=int(_session_meta.get("total_tokens", 0)),
-                        )
-                    )
-                events.tool_message.send("core", text=f"\n--- FINAL SCRIPT ---\n\n{script_content}\n")
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tool_call["id"],
-                        "name": tool_name,
-                        "content": "Final script delivered successfully to the user. Awaiting feedback.",
-                    }
-                )
-                _session_meta["current_mode"] = current_mode
-                if history_dir is None:
-                    history_dir = init_history_dir(session_dump.name)
-                save_session_snapshot(history_dir, messages, _session_meta)
-                needs_user_input = True
-                continue
-
-            elif tool_name == "execute_ipython":
-                script_to_run = tool_args.get("ipython_script", "")
-                desc = tool_args.get("description", "")
-
-                display_script = f"# {desc}\n{script_to_run}" if desc else script_to_run
-
-                cell_counter += 1
-                current_cell = cell_counter
-
-                is_repeated, repeat_warning = check_repeated_execution(display_script, exec_history)
-                if is_repeated:
-                    _guardrail_counts["repeated_execution"] += 1
-                    events.log_warn.send("core", text="Blocked: exact script ran multiple times.")
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tool_call["id"],
-                            "name": tool_name,
-                            "content": repeat_warning,
-                        }
-                    )
-                    continue
-
+                # Phase 4: Attempt JSON repair before failing
+                raw_args = tool_call["function"]["arguments"]
                 try:
-                    events.code_exec_start.send("core", script=display_script)
-                    _current_phase = "sandbox_execution"
-                    if script_to_run.strip() == "%restore":
-                        sandbox.progress_callback = lambda cur, tot: events.restore_progress.send(
-                            "core", current=cur, total=tot
-                        )
+                    tool_args = json.loads(raw_args)
+                except json.JSONDecodeError as exc:
+                    # Try to repair the JSON
+                    from .json_repair import repair_json
+
+                    repaired, json_fixes = repair_json(raw_args)
+                    if json_fixes:
+                        try:
+                            tool_args = json.loads(repaired)
+                            events.log_info.send(
+                                "core",
+                                text=f"Applied {len(json_fixes)} JSON repair(s): {', '.join(json_fixes)}",
+                            )
+                        except json.JSONDecodeError:
+                            # Repair failed, use original error
+                            tool_args = {}
+                            validation_error = f"Invalid JSON arguments: {exc}"
+                            _track_exc(exc)
                     else:
-                        sandbox.progress_callback = None
-                    try:
-                        scr = run_cancellable(cancel_token, sandbox.execute, script_to_run, stop_token=stop_token)
-                    finally:
-                        sandbox.progress_callback = None
-                        events.code_exec_end.send("core")
-                except CancelRequestedException:
-                    sandbox.cancel()
-                    events.log_info.send("core", text="Cancelled by token. Returning to prompt.")
-                    events.operation_cancelled.send("core")
+                        tool_args = {}
+                        validation_error = f"Invalid JSON arguments: {exc}"
+                        _track_exc(exc)
+                else:
+                    # Phase 1: Apply silent coercion before validation
+                    from .coercion import coerce_tool_args
+
+                    tool_args, coercion_fixes = coerce_tool_args(tool_name, tool_args)
+                    if coercion_fixes:
+                        fixes_str = ", ".join(coercion_fixes)
+                        events.log_info.send(
+                            "core",
+                            text=f"Applied {len(coercion_fixes)} silent fix(es) to {tool_name}: {fixes_str}",
+                        )
+
+                    validation_error = validate_tool_args(tool_name, tool_args)
+
+                if validation_error:
+                    consecutive_validation_failures += 1
+                    _track_synthetic_err("ToolValidationError", validation_error, 560, "main.py")
+
+                    # Truncate large error messages to prevent context bloat
+                    from .truncation import truncate_middle
+
+                    truncated_error = truncate_middle(validation_error, max_bytes=1024)
+
+                    if consecutive_validation_failures >= MAX_VALIDATION_RETRIES:
+                        _guardrail_counts["validation_bailout"] += 1
+                        events.log_error.send(
+                            "core", text=f"Tool validation failed {MAX_VALIDATION_RETRIES} times. Bailing out."
+                        )
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call["id"],
+                                "name": tool_name,
+                                "content": f"SYSTEM: Validation failed repeatedly. Error: {truncated_error}. Returning.",
+                            }
+                        )
+                        needs_user_input = True
+                        consecutive_validation_failures = 0
+                    else:
+                        events.log_warn.send("core", text=f"Tool validation error: {truncated_error}")
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call["id"],
+                                "name": tool_name,
+                                "content": f"SYSTEM: Tool Validation Error: {truncated_error}. Please fix and retry.",
+                            }
+                        )
+                    continue
+
+                consecutive_validation_failures = 0
+
+                # Deduplicate logic based on description
+                current_description = tool_args.get("description", "").strip() if tool_name == "execute_ipython" else ""
+                duplicate_warning = check_duplicate_thought(current_description, prev_description)
+                if duplicate_warning:
+                    _guardrail_counts["duplicate_thought"] += 1
+                    events.log_warn.send("core", text="Exact duplicate description detected.")
                     messages.append(
                         {
                             "role": "tool",
                             "tool_call_id": tool_call["id"],
                             "name": tool_name,
-                            "content": "SYSTEM: Execution cancelled by user.",
+                            "content": duplicate_warning,
                         }
                     )
+                    continue
+
+                if tool_name == "execute_ipython":
+                    prev_description = current_description
+
+                # Process the specific tool
+                if tool_name == "final_submit":
+                    script_content = tool_args.get("final_python_script", "")
+
+                    final_script_bounces += 1
+                    should_bounce, bounce_message = check_final_script_bounce(
+                        current_mode, final_script_bounces, MAX_FINAL_SCRIPT_BOUNCES
+                    )
+                    if should_bounce:
+                        _guardrail_counts["final_script_bounce"] += 1
+                        events.log_warn.send(
+                            "core",
+                            text=(
+                                "Final script submitted outside building mode (or verification needed) — bouncing back."
+                            ),
+                        )
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call["id"],
+                                "name": tool_name,
+                                "content": bounce_message,
+                            }
+                        )
+                        continue
+
+                    events.log_info.send("core", text="Agent submitted the final script.")
+                    _session_outcome = "success"
+                    _final_scripts_submitted += 1
+                    with suppress(Exception):
+                        from .telemetry import FinalScriptSubmittedProps, client
+
+                        started_dt = datetime.fromisoformat(_session_meta["session_started"])
+                        _fs_duration = (datetime.now() - started_dt).total_seconds()
+                        client.track_final_script_submitted(
+                            FinalScriptSubmittedProps(
+                                step=_total_steps,
+                                cell=int(_session_meta.get("cells_executed", 0)),
+                                duration_seconds=_fs_duration,
+                                total_tokens=int(_session_meta.get("total_tokens", 0)),
+                            )
+                        )
+                    events.tool_message.send("core", text=f"\n--- FINAL SCRIPT ---\n\n{script_content}\n")
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call["id"],
+                            "name": tool_name,
+                            "content": "Final script delivered successfully to the user. Awaiting feedback.",
+                        }
+                    )
+                    _session_meta["current_mode"] = current_mode
+                    if history_dir is None:
+                        history_dir = init_history_dir(session_dump.name)
+                    save_session_snapshot(history_dir, messages, _session_meta)
                     needs_user_input = True
                     continue
 
-                # ── Check sandbox-level errors for telemetry ──────────────────
-                if sandbox.last_error_info:
-                    _track_synthetic_err(
-                        sandbox.last_error_info["exception_class"],
-                        sandbox.last_error_info["message"],
-                        sandbox.last_error_info["line"],
-                        sandbox.last_error_info["file"],
-                    )
+                elif tool_name == "execute_ipython":
+                    script_to_run = tool_args.get("ipython_script", "")
+                    desc = tool_args.get("description", "")
 
-                output_match_cell = None
-                for _prev_script, prev_output, prev_cell in exec_history:
-                    if prev_output and scr == prev_output and len(scr) > 100:
-                        output_match_cell = prev_cell
-                        break
+                    display_script = f"# {desc}\n{script_to_run}" if desc else script_to_run
 
-                if output_match_cell is not None:
-                    scr = (
-                        f"The output is the same as Cell_{output_match_cell}. "
-                        f"Use %view_output Cell_{output_match_cell} if you need to review it."
-                    )
-                exec_history.append((display_script.strip(), scr, current_cell))
-                _session_meta["cells_executed"] += 1
-                _session_meta["cell_counter"] = cell_counter
-                _session_meta["current_mode"] = current_mode
-                if history_dir is None:
-                    history_dir = init_history_dir(session_dump.name)
-                save_session_snapshot(history_dir, messages, _session_meta)
-                events.code_exec_output.send("core", output=scr)
+                    cell_counter += 1
+                    current_cell = cell_counter
 
-                tool_response_content = f"<terminal_output>\n{scr}\n</terminal_output>"
-
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tool_call["id"],
-                        "name": tool_name,
-                        "content": tool_response_content,
-                    }
-                )
-
-                awaiting_tool_complete = False
-
-            elif tool_name == "switch_mode":
-                target_mode = tool_args.get("target_mode")
-                context_memo = tool_args.get("context", "")
-                events.mode_switch.send("core", mode=target_mode)
-
-                _prev_mode = current_mode
-                current_mode = target_mode
-
-                with suppress(Exception):
-                    from .telemetry import ModeSwitchedProps, client
-
-                    client.track_mode_switched(
-                        ModeSwitchedProps(
-                            from_mode=_prev_mode,
-                            to_mode=target_mode,
-                            step=_total_steps,
-                            cell=int(_session_meta.get("cells_executed", 0)),
+                    is_repeated, repeat_warning = check_repeated_execution(display_script, exec_history)
+                    if is_repeated:
+                        _guardrail_counts["repeated_execution"] += 1
+                        events.log_warn.send("core", text="Blocked: exact script ran multiple times.")
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call["id"],
+                                "name": tool_name,
+                                "content": repeat_warning,
+                            }
                         )
+                        continue
+
+                    try:
+                        events.code_exec_start.send("core", script=display_script)
+                        _current_phase = "sandbox_execution"
+                        if script_to_run.strip() == "%restore":
+                            sandbox.progress_callback = lambda cur, tot: events.restore_progress.send(
+                                "core", current=cur, total=tot
+                            )
+                        else:
+                            sandbox.progress_callback = None
+                        try:
+                            scr = run_cancellable(cancel_token, sandbox.execute, script_to_run, stop_token=stop_token)
+                        finally:
+                            sandbox.progress_callback = None
+                            events.code_exec_end.send("core")
+                    except CancelRequestedException:
+                        sandbox.cancel()
+                        events.log_info.send("core", text="Cancelled by token. Returning to prompt.")
+                        events.operation_cancelled.send("core")
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call["id"],
+                                "name": tool_name,
+                                "content": "SYSTEM: Execution cancelled by user.",
+                            }
+                        )
+                        needs_user_input = True
+                        continue
+
+                    # ── Check sandbox-level errors for telemetry ──────────────────
+                    if sandbox.last_error_info:
+                        _track_synthetic_err(
+                            sandbox.last_error_info["exception_class"],
+                            sandbox.last_error_info["message"],
+                            sandbox.last_error_info["line"],
+                            sandbox.last_error_info["file"],
+                        )
+
+                    output_match_cell = None
+                    for _prev_script, prev_output, prev_cell in exec_history:
+                        if prev_output and scr == prev_output and len(scr) > 100:
+                            output_match_cell = prev_cell
+                            break
+
+                    if output_match_cell is not None:
+                        scr = (
+                            f"The output is the same as Cell_{output_match_cell}. "
+                            f"Use %view_output Cell_{output_match_cell} if you need to review it."
+                        )
+                    exec_history.append((display_script.strip(), scr, current_cell))
+                    _session_meta["cells_executed"] += 1
+                    _session_meta["cell_counter"] = cell_counter
+                    _session_meta["current_mode"] = current_mode
+                    if history_dir is None:
+                        history_dir = init_history_dir(session_dump.name)
+                    save_session_snapshot(history_dir, messages, _session_meta)
+                    events.code_exec_output.send("core", output=scr)
+
+                    tool_response_content = f"<terminal_output>\n{scr}\n</terminal_output>"
+
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call["id"],
+                            "name": tool_name,
+                            "content": tool_response_content,
+                        }
                     )
 
-                mode_injection = MODE_INJECTIONS.get(target_mode, "")
+                    awaiting_tool_complete = False
 
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tool_call["id"],
-                        "name": tool_name,
-                        "content": "Mode switched successfully.",
-                    }
-                )
+                elif tool_name == "switch_mode":
+                    target_mode = tool_args.get("target_mode")
+                    context_memo = tool_args.get("context", "")
+                    events.mode_switch.send("core", mode=target_mode)
 
-                mode_switch_notification = (
-                    f"{mode_injection}\n\n--- Research memo from previous mode ---\n{context_memo}"
-                )
-                awaiting_mode_switch = True
-                _session_meta["current_mode"] = current_mode
-                if history_dir is None:
-                    history_dir = init_history_dir(session_dump.name)
-                save_session_snapshot(history_dir, messages, _session_meta)
+                    _prev_mode = current_mode
+                    current_mode = target_mode
+
+                    with suppress(Exception):
+                        from .telemetry import ModeSwitchedProps, client
+
+                        client.track_mode_switched(
+                            ModeSwitchedProps(
+                                from_mode=_prev_mode,
+                                to_mode=target_mode,
+                                step=_total_steps,
+                                cell=int(_session_meta.get("cells_executed", 0)),
+                            )
+                        )
+
+                    mode_injection = MODE_INJECTIONS.get(target_mode, "")
+
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call["id"],
+                            "name": tool_name,
+                            "content": "Mode switched successfully.",
+                        }
+                    )
+
+                    mode_switch_notification = (
+                        f"{mode_injection}\n\n--- Research memo from previous mode ---\n{context_memo}"
+                    )
+                    awaiting_mode_switch = True
+                    _session_meta["current_mode"] = current_mode
+                    if history_dir is None:
+                        history_dir = init_history_dir(session_dump.name)
+                    save_session_snapshot(history_dir, messages, _session_meta)
 
     except StopRequestedException:
         events.log_info.send("core", text="Agent loop stopped by user.")

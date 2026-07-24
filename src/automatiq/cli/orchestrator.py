@@ -61,19 +61,25 @@ _phase = "streaming"
 
 
 def _split_md_pending(buffer: str):
-    """Split buffer at last newline.
+    """Split buffer at last word boundary.
 
     Returns ``(markdown_renderable, pending_text)``:
-    - completed lines → :class:`Markdown` (re-parsed only on newline boundary)
-    - in-progress line → :class:`Text` with a cursor block char ``▍``
+    - completed words → :class:`Markdown` (re-parsed on word boundary)
+    - in-progress word → :class:`Text` with a cursor block char ``▍``
     """
     if not buffer:
         return None, None
-    idx = buffer.rfind("\n")
-    if idx == -1:
+
+    # Find the last word boundary (space or newline)
+    last_space = buffer.rfind(" ")
+    last_newline = buffer.rfind("\n")
+    split_idx = max(last_space, last_newline)
+
+    if split_idx == -1:
         return None, Text(buffer + "\u258d", style="dim")
-    completed = buffer[: idx + 1]
-    pending = buffer[idx + 1 :]
+
+    completed = buffer[: split_idx + 1]
+    pending = buffer[split_idx + 1 :]
     md = Markdown(completed) if completed.strip() else None
     pt = Text(pending + "\u258d", style="dim") if pending else None
     return md, pt

@@ -3,6 +3,50 @@
 # ruff: noqa: E501
 
 
+def _extract_syntax_error_details(code: str) -> tuple[str, int | None] | None:
+    """
+    Extract detailed syntax error information from code.
+
+    Returns (error_message, line_number) or None if no detailed error can be extracted.
+    """
+    import ast
+
+    # Try ast.parse first (faster, gives line numbers)
+    try:
+        ast.parse(code)
+        return None
+    except SyntaxError as e:
+        return (e.msg or "syntax error", e.lineno)
+
+
+def _format_script_preview(code: str, error_line: int | None, context_lines: int = 2) -> str:
+    """
+    Format a script preview with line numbers and error highlighting.
+
+    Shows `context_lines` lines before and after the error line.
+    """
+    lines = code.split("\n")
+    if not lines:
+        return ""
+
+    # If no error line, show first few lines
+    if error_line is None:
+        preview_lines = lines[:10]
+        return "\n".join(f"  {i + 1}: {line}" for i, line in enumerate(preview_lines))
+
+    # Show context around error line
+    start = max(0, error_line - context_lines - 1)
+    end = min(len(lines), error_line + context_lines)
+
+    preview_lines = []
+    for i in range(start, end):
+        line_num = i + 1
+        marker = ">>>" if line_num == error_line else "   "
+        preview_lines.append(f"{marker} {line_num}: {lines[i]}")
+
+    return "\n".join(preview_lines)
+
+
 def validate_ipython_script(code: str) -> str:
     """Validate IPython script syntax using IPython's native TransformerManager."""
     stripped = code.strip()
@@ -19,7 +63,19 @@ def validate_ipython_script(code: str) -> str:
     status, _ = tm.check_complete(code + "\n")
 
     if status == "invalid":
-        raise ValueError("Syntax error: the IPython code is invalid.")
+        # Try to extract detailed syntax error info
+        error_info = _extract_syntax_error_details(code)
+        if error_info:
+            msg, lineno = error_info
+            preview = _format_script_preview(code, lineno)
+            error_msg = f"Syntax error at line {lineno}: {msg}\n\nScript preview:\n{preview}"
+            raise ValueError(error_msg)
+        else:
+            # Fallback: generic message with preview
+            preview = _format_script_preview(code, None)
+            error_msg = f"Syntax error: the IPython code is invalid.\n\nScript preview:\n{preview}"
+            raise ValueError(error_msg)
+
     if status == "incomplete":
         raise ValueError("Incomplete code: the cell expects more lines (unclosed block, bracket, or string).")
 
@@ -27,7 +83,9 @@ def validate_ipython_script(code: str) -> str:
     try:
         compile(tm.transform_cell(code), "<cell>", "exec")
     except SyntaxError as e:
-        raise ValueError(f"Syntax error: {e.msg} at line {e.lineno}") from e
+        preview = _format_script_preview(code, e.lineno)
+        error_msg = f"Syntax error: {e.msg} at line {e.lineno}\n\nScript preview:\n{preview}"
+        raise ValueError(error_msg) from e
 
     return code
 
@@ -41,7 +99,8 @@ def validate_tool_args(tool_name: str, tool_args: dict) -> str | None:
         try:
             validate_ipython_script(tool_args["ipython_script"])
         except ValueError as e:
-            return str(e)
+            # Prefix with field name for clarity
+            return f"ipython_script: {e}"
 
         if "description" not in tool_args or not isinstance(tool_args["description"], str):
             return "Missing 'description' string. Provide a 5-10 word description."
@@ -49,7 +108,8 @@ def validate_tool_args(tool_name: str, tool_args: dict) -> str | None:
     elif tool_name == "switch_mode":
         valid_modes = ["reading", "testing", "building"]
         if "target_mode" not in tool_args or tool_args["target_mode"] not in valid_modes:
-            return "Missing or invalid 'target_mode'. Must be reading, testing, or building."
+            actual = tool_args.get("target_mode", "<missing>")
+            return f"target_mode: Invalid value '{actual}'. Must be one of: {', '.join(valid_modes)}."
         elif "context" not in tool_args or not isinstance(tool_args["context"], str):
             return "Missing or invalid 'context' string."
 

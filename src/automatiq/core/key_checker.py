@@ -7,6 +7,7 @@ rather than failing deep inside the agent loop with a cryptic API error.
 """
 
 import logging
+import os
 import sys
 
 import litellm
@@ -16,7 +17,7 @@ from . import config, events
 logger = logging.getLogger(__name__)
 
 
-def _validate_model(model: str) -> bool:
+def _validate_model(model: str, api_key: str | None = None) -> bool:
     """
     Validate that the environment has what it needs to call `model`.
 
@@ -25,9 +26,16 @@ def _validate_model(model: str) -> bool:
     check_valid_key() is only trustworthy for OpenAI and returns false
     negatives for Gemini, Anthropic, and others.
 
-    Returns True if everything looks good, False otherwise (errors already printed).
+    When *api_key* is a non-None value (e.g. ``"not-required"`` for a local
+    endpoint), litellm's built-in substring filter at
+    ``litellm/utils.py:filter_missing_keys`` strips any ``*_API_KEY`` entries
+    from ``missing_keys``, so the check passes for keyless local servers
+    without us hand-rolling per-provider logic.
+
+    Returns True if everything looks good, False otherwise (errors already
+    printed).
     """
-    result = litellm.validate_environment(model)
+    result = litellm.validate_environment(model, api_key=api_key)
 
     missing = result.get("missing_keys", [])
     if missing:
@@ -51,12 +59,6 @@ def check_api_keys(*models: str) -> None:
         check_api_keys(config.AGENT_MODEL)
         check_api_keys(config.AGENT_MODEL, config.RECORDER_AI_MODEL)
     """
-    # When a custom base URL is set the requests go to a user-controlled
-    # endpoint — standard provider API keys are not required.
-    if config.API_BASE:
-        events.log_info.send("key_checker", text=f"Custom endpoint ({config.API_BASE}) — skipping key validation.")
-        return
-
     # GitHub Copilot uses OAuth device flow — no env key to validate
     if any(m.startswith("github_copilot/") for m in models):
         events.log_info.send(
@@ -64,14 +66,30 @@ def check_api_keys(*models: str) -> None:
         )
         return
 
+    # When a custom base URL is set, requests go to a user-controlled endpoint
+    # (Ollama, vLLM, LM Studio).  Standard provider API keys are not required.
+    # We pass a dummy api_key to litellm's validate_environment so its built-in
+    # substring filter clears *_API_KEY from missing_keys.  If the user DID set
+    # OPENAI_API_KEY (some local servers require auth), the real key is forwarded.
+    effective_api_key: str | None = None
+    if config.API_BASE:
+        effective_api_key = os.environ.get("OPENAI_API_KEY") or "not-required"
+        events.log_info.send("key_checker", text=f"Custom endpoint ({config.API_BASE}) — key validation relaxed.")
+
     # Catch obviously malformed model strings before hitting litellm
     for m in models:
         if "/" not in m:
+            hint = ""
+            if config.API_BASE:
+                hint = (
+                    f"\nSince base_url is set ({config.API_BASE}), this looks like a local model. "
+                    f"Prefix it with 'openai/' (e.g. 'openai/{m}')."
+                )
             events.log_error.send(
                 "key_checker",
                 text=(
                     f"Invalid model string '{m}'. Expected format: 'provider/model-name' "
-                    f"(e.g. 'gemini/gemini-2.5-flash').\n"
+                    f"(e.g. 'gemini/gemini-2.5-flash').{hint}\n"
                     f"Check [models] agent in ~/.automatiq/config.toml."
                 ),
             )
@@ -85,7 +103,7 @@ def check_api_keys(*models: str) -> None:
             continue
         seen.add(model)
 
-        ok = _validate_model(model)
+        ok = _validate_model(model, api_key=effective_api_key)
         if not ok:
             failed.append(model)
 

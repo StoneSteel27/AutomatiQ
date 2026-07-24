@@ -28,19 +28,161 @@ from .cdp.websockets import _WebsocketHandlers
 logger = logging.getLogger(__name__)
 
 
-BROWSER_UX_FLAGS = [
-    # Hide browser-maintenance UI
-    "--disable-brave-update",
-    "--disable-features=OutdatedBuildDetector",
-    "--no-default-browser-check",
+# ---------------------------------------------------------------------------
+# Launch flags — derived from:
+#   - Puppeteer ChromeLauncher.defaultArgs()
+#   - Playwright chromiumSwitches (observed CLI)
+#   - GoogleChrome/chrome-launcher docs / chrome-flags-for-tools.md
+#
+# Intentional OMISSIONS (do not add casually):
+#   --enable-automation            → sets navigator.webdriver (bad for stealth)
+#   --disable-extensions           → we load the AutomatiQ extension every run
+#   --remote-debugging-pipe/port   → zendriver owns the CDP port
+#   --headless*                    → headed recorder (headless=False)
+#   --single-process               → unstable / crashes under load
+#   --no-zygote                    → Linux-only hack; pair with --no-sandbox only
+#                                    if truly needed
+# Note: --no-sandbox cannot be passed via Config.add_argument (zendriver raises
+# ValueError on the substring). Set it through ``sandbox=False`` instead, which
+# is what ``platform_launch_policy`` does below.
+#
+# Many stability flags (``--no-first-run``, ``--password-store=basic``,
+# ``--disable-dev-shm-usage``, several others) are already injected by
+# zendriver's own ``_default_browser_args`` (config.py:119). ``apply_browser_flags``
+# dedupes by flag key against the merged defaults so we never emit a literal
+# duplicate ``--foo``; but for ``--disable-features`` / ``--enable-features`` we
+# always emit our own merged value as the LAST occurrence so that Chrome's
+# "last switch wins" policy makes our superset authoritative. Our superset
+# additionally restores ``DisableLoadExtensionCommandLineSwitch`` (zendriver's
+# own ``__call__`` accidentally overrides its default away) so that
+# ``--load-extension`` keeps working for the recorder extension.
+# ---------------------------------------------------------------------------
+
+# Features disabled by Puppeteer + Playwright (merged into ONE flag). Includes
+# zendriver's intended defaults so our last-occurrence override is a superset.
+_DISABLED_FEATURES = [
+    # zendriver intended defaults (must be preserved in our override)
+    "IsolateOrigins",
+    "DisableLoadExtensionCommandLineSwitch",
+    "site-per-process",
+    # Puppeteer defaults
+    "Translate",
+    "AcceptCHFrame",  # crbug.com/1348106
+    "MediaRouter",  # cast / macOS network-permission dialog
+    "OptimizationHints",
+    "ProcessPerSiteUpToMainFrameThreshold",  # crbug.com/1492053 (we already had this)
+    "IsolateSandboxedIframes",  # puppeteer#10715
+    # Playwright extras (stable automation)
+    "InterestFeedContentSuggestions",
+    "CalculateNativeWinOcclusion",  # Windows throttle of "foreground" tabs
+    "BackForwardCache",
+    "GlobalMediaControls",
+    "DestroyProfileOnBrowserClose",
+    "DialMediaRouteProvider",
+    "CertificateTransparencyComponentUpdater",
+    "AvoidUnnecessaryBeforeUnloadCheckSync",
+    "ImprovedCookieControls",
+    "LazyFrameLoading",
+    "PaintHolding",
+    "ThirdPartyStoragePartitioning",
+    # Brave / UX
+    "OutdatedBuildDetector",
+]
+
+# Puppeteer default — harmless, keeps PDF path sane if ever used.
+_ENABLED_FEATURES = [
+    "PdfOopif",
+]
+
+# Cross-platform stability + quiet UX (safe with headed + always-on extension).
+# zendriver already provides several of these via its own defaults; the helpers
+# below dedupe so the union is emitted exactly once each.
+BROWSER_LAUNCH_FLAGS: list[str] = [
+    # --- crash / resource stability (the important ones for the launch race) ---
+    "--disable-breakpad",
+    "--disable-crash-reporter",
+    "--disable-hang-monitor",
+    "--disable-ipc-flooding-protection",
+    "--metrics-recording-only",
+    # --- background noise that steals CPU at boot ---
+    "--disable-background-networking",
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+    "--disable-component-update",
+    "--disable-domain-reliability",
+    "--disable-sync",
+    "--disable-client-side-phishing-detection",
+    "--disable-component-extensions-with-background-pages",
+    "--disable-default-apps",
+    "--disable-field-trial-config",  # hermetic, no random A/B
+    # --- first-run / keychain / password UI (silent hangs on macOS/Linux) ---
     "--no-first-run",
+    "--no-default-browser-check",
     "--no-service-autorun",
-    # Avoid launch/relaunch disruption
+    "--password-store=basic",  # avoid Gnome Keyring / KDE Wallet
+    "--use-mock-keychain",  # avoid macOS Keychain modal (no-op elsewhere)
+    "--disable-search-engine-choice-screen",
+    # --- session restore / crash bubbles (former BROWSER_UX_FLAGS) ---
+    "--disable-brave-update",
     "--disable-session-crashed-bubble",
     "--hide-crash-restore-bubble",
-    # Keep the automation window focused on the target site
-    "--disable-background-networking",
+    "--disable-prompt-on-repost",
+    "--disable-popup-blocking",
+    "--disable-infobars",
+    # --- rendering consistency ---
+    "--force-color-profile=srgb",
+    # --- merged feature flags (MUST remain single args) ---
+    f"--disable-features={','.join(_DISABLED_FEATURES)}",
+    f"--enable-features={','.join(_ENABLED_FEATURES)}",
 ]
+
+# Kept as a deprecated alias so external import sites (tests, plugins) keep
+# resolving. New code should target BROWSER_LAUNCH_FLAGS.
+BROWSER_UX_FLAGS: list[str] = BROWSER_LAUNCH_FLAGS
+
+
+def platform_launch_policy() -> dict:
+    """Mirrors Playwright/Puppeteer portable defaults.
+
+    - ``sandbox=False`` on EVERY platform (Playwright: ``chromiumSandbox !==
+      true``). The previous Darwin-only path left Linux/Windows containers
+      and CI runners fragile.
+    - ~30s total connect budget (Playwright launch-timeout model) instead of
+      zendriver's 0.25s × 10 = 2.75s default which raced a cold Brave + a
+      stale extension load on slow disks / VM window-servers.
+    """
+    policy: dict = {
+        "sandbox": False,
+        "browser_connection_timeout": 1.0,
+        "browser_connection_max_tries": 30,  # ~30s total
+    }
+    # Slightly longer on slow disks / cold extension load on Linux CI runners.
+    if sys.platform.startswith("linux"):
+        policy["browser_connection_max_tries"] = 40
+    return policy
+
+
+def apply_browser_flags(zd_config: "zd.Config", *, proxy: str | None = None) -> None:
+    """Apply launch flags to ``zd_config`` without duplicating known args.
+
+    Dedupes against zendriver's merged ``browser_args`` (defaults + caller
+    additions) by flag key. For ``--disable-features`` / ``--enable-features``
+    we always emit our own value even if a default exists: Chrome uses
+    "last switch wins", so our superset (which also contains zendriver's
+    intended features) becomes authoritative.
+    """
+    existing = {a.split("=", 1)[0] for a in (getattr(zd_config, "browser_args", []) or [])}
+    for flag in BROWSER_LAUNCH_FLAGS:
+        key = flag.split("=", 1)[0]
+        if key in ("--disable-features", "--enable-features"):
+            zd_config.add_argument(flag)
+            continue
+        if key in existing:
+            continue
+        zd_config.add_argument(flag)
+    if proxy:
+        zd_config.add_argument(f"--proxy-server={proxy}")
 
 
 class BrowserAgent(_TargetManager, _NetworkHandlers, _WebsocketHandlers):
@@ -169,7 +311,11 @@ class BrowserAgent(_TargetManager, _NetworkHandlers, _WebsocketHandlers):
             # browser (downloaded Brave or Chrome fallback), honour it; else
             # fall back to the legacy behaviour of letting BROWSER_TYPE drive
             # zendriver's own autodetect.
-            zd_kwargs: dict = dict(user_data_dir=self._profile_dir.name, headless=False)
+            zd_kwargs: dict = dict(
+                user_data_dir=self._profile_dir.name,
+                headless=False,
+                **platform_launch_policy(),  # sandbox off + ~30s connect budget, all platforms
+            )
             if browser_resolution is not None:
                 verb, value, descriptor = browser_resolution
                 if verb == "browser_executable_path" and value is not None:
@@ -180,22 +326,27 @@ class BrowserAgent(_TargetManager, _NetworkHandlers, _WebsocketHandlers):
                     events.log_info.send("recorder", text=f"Using {descriptor}")
             else:
                 zd_kwargs["browser"] = config.BROWSER_TYPE
-            if sys.platform == "darwin":
-                zd_kwargs["sandbox"] = False
-                zd_kwargs["browser_connection_timeout"] = 1.0
-                zd_kwargs["browser_connection_max_tries"] = 20
             zd_config = zd.Config(**zd_kwargs)
-            if sys.platform == "darwin":
-                zd_config.add_argument("--use-mock-keychain")
             zd_config.add_extension(ext_dir)
-            zd_config.add_argument("--disable-popup-blocking")
-            zd_config.add_argument("--disable-features=ProcessPerSiteUpToMainFrameThreshold")
-            for flag in BROWSER_UX_FLAGS:
-                zd_config.add_argument(flag)
+            apply_browser_flags(zd_config, proxy=self.proxy)
             if self.proxy:
-                zd_config.add_argument(f"--proxy-server={self.proxy}")
                 events.log_info.send("recorder", text=f"Routing browser through proxy: {self.proxy}")
-            self.browser = await zd.Browser.create(config=zd_config)
+            # A single retry absorbs the remaining cold-launch race that the
+            # flags/timeouts above don't fully eliminate (production-scrape
+            # pattern layered on top of Puppeteer/Playwright stability core).
+            last_exc: Exception | None = None
+            for attempt in range(1, 4):
+                try:
+                    self.browser = await zd.Browser.create(config=zd_config)
+                    last_exc = None
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    events.log_error.send("recorder", text=f"Browser launch attempt {attempt}/3 failed: {exc}")
+                    if attempt < 3:
+                        await asyncio.sleep(0.5 * attempt)
+            if last_exc is not None:
+                raise last_exc
             self.recording_start = datetime.now(UTC)
 
             # 1. Get the primary tab

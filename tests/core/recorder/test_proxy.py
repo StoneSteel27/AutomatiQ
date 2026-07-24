@@ -174,8 +174,21 @@ class TestBrowserAgentProxy:
         assert agent.proxy is None
 
     def test_browser_ux_flags_present(self):
-        from automatiq.core.recorder.browser_agent import BROWSER_UX_FLAGS
+        from automatiq.core.recorder.browser_agent import BROWSER_LAUNCH_FLAGS
 
-        assert "--disable-brave-update" in BROWSER_UX_FLAGS
-        assert "--no-first-run" in BROWSER_UX_FLAGS
-        assert "--disable-background-networking" in BROWSER_UX_FLAGS
+        assert "--disable-brave-update" in BROWSER_LAUNCH_FLAGS
+        assert "--no-first-run" in BROWSER_LAUNCH_FLAGS
+        assert "--disable-background-networking" in BROWSER_LAUNCH_FLAGS
+        # The merged --disable-features must be a single entry that contains
+        # both our drop-in extras and zendriver's intended defaults (so the
+        # last-occurrence "switch wins" override is a strict superset).
+        df_flags = [a for a in BROWSER_LAUNCH_FLAGS if a.startswith("--disable-features=")]
+        assert len(df_flags) == 1
+        assert "ProcessPerSiteUpToMainFrameThreshold" in df_flags[0]
+        assert "IsolateOrigins" in df_flags[0]
+        assert "DisableLoadExtensionCommandLineSwitch" in df_flags[0]
+        assert "site-per-process" in df_flags[0]
+        # Legacy alias must keep resolving for external import sites.
+        from automatiq.core.recorder.browser_agent import BROWSER_UX_FLAGS as _legacy
+
+        assert _legacy is BROWSER_LAUNCH_FLAGS

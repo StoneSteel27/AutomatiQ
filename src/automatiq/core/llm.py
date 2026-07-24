@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 
 import litellm
 
@@ -37,9 +38,15 @@ def extract_message(exc) -> str:
 def _build_model_help(model: str, original_msg: str) -> str:
     """Build a simple error message for an invalid or unsupported model."""
     if "/" not in model:
+        hint = ""
+        if config.API_BASE:
+            hint = (
+                f"\nSince base_url is set ({config.API_BASE}), this looks like a local model. "
+                f"Prefix it with 'openai/' (e.g. 'openai/{model}')."
+            )
         return (
             f"Invalid model string '{model}'. Expected format: 'provider/model-name' "
-            f"(e.g. 'gemini/gemini-2.5-flash').\n"
+            f"(e.g. 'gemini/gemini-2.5-flash').{hint}\n"
             f"Original error: {original_msg}"
         )
 
@@ -89,6 +96,7 @@ def call_llm_streaming(msgs: list[dict], tools: list[dict]):
     )
     if config.API_BASE:
         kwargs["api_base"] = config.API_BASE
+        kwargs["api_key"] = os.environ.get("OPENAI_API_KEY") or "not-required"
 
     if litellm.supports_reasoning(model=config.AGENT_MODEL):
         kwargs["reasoning_effort"] = "high"

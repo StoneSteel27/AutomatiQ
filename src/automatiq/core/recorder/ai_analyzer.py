@@ -6,6 +6,7 @@ import subprocess
 
 import imageio_ffmpeg
 import litellm
+from litellm.exceptions import InternalServerError
 from pydantic import BaseModel, Field
 
 from .. import config, events
@@ -36,7 +37,7 @@ class VideoActionAnalyzer:
     SUBPROCESS_TIMEOUT = 60  # seconds — guard against hanging ffmpeg
 
     # Connection-level errors that should NOT be retried (DNS, network down, etc.)
-    _FATAL_EXC_TYPES = (litellm.APIConnectionError, litellm.NotFoundError)
+    _FATAL_EXC_TYPES = (litellm.APIConnectionError, litellm.NotFoundError, InternalServerError)
 
     def __init__(self):
         self.model = config.RECORDER_AI_MODEL
@@ -187,6 +188,7 @@ class VideoActionAnalyzer:
             )
             if config.API_BASE:
                 kwargs["api_base"] = config.API_BASE
+                kwargs["api_key"] = os.environ.get("OPENAI_API_KEY") or "not-required"
 
             for attempt in range(1, 4):  # Max 3 attempts
                 try:
@@ -264,6 +266,7 @@ class VideoActionAnalyzer:
             )
             if config.API_BASE:
                 kwargs["api_base"] = config.API_BASE
+                kwargs["api_key"] = os.environ.get("OPENAI_API_KEY") or "not-required"
 
             for attempt in range(1, 4):
                 try:
