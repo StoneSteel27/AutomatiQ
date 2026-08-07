@@ -108,24 +108,67 @@ automatiq feedback
 
 This sends your message (along with OS/version info) to the telemetry endpoint. No account or GitHub login required.
 
-## Sponsor
+## Sponsors
+
+<sup>Want to Sponsor this Project? Contact me via discord: [@moltensteel](https://discordapp.com/users/772033037788905482)</sup>
+
+Maintaining this open-source project sustainably is made possible thanks to our sponsors.
+
+---
 
 <a href="https://go.nodemaven.com/automatiq">
   <img align="right" src="https://raw.githubusercontent.com/StoneSteel27/AutomatiQ/main/assets/nodemaven_banner.png" alt="NodeMaven - High Quality Proxies" width="400">
 </a>
 
-Running web automation and scraping scripts reliably requires high-quality proxies to avoid rate limits, IP bans, and CAPTCHA blocks. [NodeMaven](https://go.nodemaven.com/automatiq) is our recommended provider.
+### [NodeMaven](https://go.nodemaven.com/automatiq) — High Quality Proxy Infrastructure
 
-**Why NodeMaven?**
-- You get **99.9% uptime** with sticky sessions lasting up to 7 days.
-- All proxies have a **fraud score under 97%** while requiring **No KYC** for registration.
-- You can earn up to **10% cashback** on the data you use.
+Running web automation and scraping scripts reliably requires high-quality proxies to avoid rate limits, IP bans, and CAPTCHA blocks.
 
-🎁 **Special codes for AutomatiQ users:**
-- `AUTOMATIQ35` - **35% off** Mobile and Residential Proxies
-- `AUTOMATIQ40` - **40% off** ISP (Static) Proxies
+- **99.9% uptime** with sticky sessions up to 7 days.
+- All proxies have a **fraud score under 97%** — **No KYC** required.
+- Earn up to **10% cashback** on the data you use.
 
-Maintaining this open-source project sustainably is made possible thanks to our sponsor, **NodeMaven**.
+**Special codes for AutomatiQ users:**
+- `AUTOMATIQ35` — **35% off** Mobile and Residential Proxies
+- `AUTOMATIQ40` — **40% off** ISP (Static) Proxies
+
+---
+
+<a href="https://www.swiftproxy.net/?ref=AutomatiQ">
+  <img align="right" src="https://raw.githubusercontent.com/StoneSteel27/AutomatiQ/main/assets/swiftproxy_Banner.png" alt="Swiftproxy - Residential & Static Proxies" width="400">
+</a>
+
+### [Swiftproxy](https://www.swiftproxy.net/?ref=AutomatiQ) — Residential & Static Residential Proxies
+
+Whether you're building browser agents, AI-powered automation workflows, or large-scale data pipelines, Swiftproxy provides the proxy infrastructure to keep your sessions stable and your blocks low.
+
+- **90M+ clean residential IPs** across global locations.
+- **Static residential proxies** for stable sessions, account isolation, and multi-account workflows.
+- **Non-expiring traffic** on dynamic residential proxies — use it whenever you need it.
+- **Free testing** available to evaluate performance before integrating.
+
+**AutomatiQ community offer:**
+- `PROXY90` — **10% off** Residential and Static Residential Proxies
+
+---
+
+<a href="https://www.rapidproxy.io/?ref=AutomatiQ">
+  <img align="right" src="https://raw.githubusercontent.com/StoneSteel27/AutomatiQ/main/assets/Rapidproxy_banner.png" alt="RapidProxy - Residential Proxy Network" width="400">
+</a>
+
+### [RapidProxy](https://www.rapidproxy.io/?ref=AutomatiQ) — High-Performance Residential Proxy Network
+
+Built for developers and teams running web scrapers, browser automation, AI agents, and monitoring tools at scale.
+
+- **90M+ residential IPs** with smart rotation for resilient requests.
+- **High-concurrency support** for workloads at scale.
+- **AI-powered CAPTCHA bypass** to reduce interruptions.
+- **Non-expiring traffic** — use purchased bandwidth whenever you need it.
+
+**AutomatiQ community offer:**
+- **Free trial** available.
+- Pricing starts at **$0.65/GB**.
+- `RAPID10` — **10% off**
 
 ## Models & Custom Endpoints
 
