@@ -22,7 +22,40 @@
 > [!Note]
 > **Alpha** ⟶ Things will break and change. Read [VISION.md](https://github.com/StoneSteel27/AutomatiQ/blob/main/VISION.md) to understand what AutomatiQ is trying to achieve and where it's headed.
 
-AutomatiQ records HTTP requests, Websocket frames, and your interactions for reverse-engineering your **goal/intent** into a standalone Python automation/extraction script without needing any manual inspection and unnecessary paid dependencies, or heavy dependencies like a browser during runtime.
+**Do the task once in your browser. AutomatiQ writes the script for you.**
+
+Hand-writing scraping and automation scripts is tedious, and reverse-engineering a website's hidden APIs by hand is even worse. AutomatiQ records what the site actually does: the HTTP requests, WebSocket frames, and your interactions. An AI agent then reverse-engineers all of it into a clean, standalone Python script. No manual inspection, no paid dependencies.
+
+The obvious alternative is driving a real browser, but record-and-replay tools that click buttons are heavy and brittle. Buttons move and pages load slowly, so scripts break. Under the hood, though, websites are just sending text-based HTTP requests. AutomatiQ targets those requests directly and produces a lightweight [`requests`](https://requests.readthedocs.io/)-based script with no browser needed at runtime, hundreds of times faster and ~10× lighter than browser automation.
+
+## Contents
+
+- [What you get](#what-you-get)
+- [How it works](#how-it-works)
+- [Getting Started](#getting-started)
+- [Usage Modes](#usage-modes)
+- [Models & Custom Endpoints](#models--custom-endpoints)
+- [Proxy](#proxy)
+- [Reference](#reference)
+- [FAQ](#faq)
+- [Privacy & Telemetry](#privacy--telemetry)
+- [Development](#development)
+- [Sponsors](#sponsors)
+
+## What you get
+
+A single `automatiq run` session produced this ~460-line CLI tool for [BookMyShow](https://in.bookmyshow.com/). You pick a city, movie, date and showtime, and it renders the live seat map in your terminal. The agent reverse-engineered the **AES-CBC encryption** that BookMyShow applies to its seat-layout payload:
+
+```python
+# The seat layout comes back encrypted
+str_data = session.post(seat_layout_url, files=payload).json()["BookMyShow"]["strData"]
+
+# AutomatiQ recovered the AES-CBC scheme and key from the recorded traffic
+cipher = AES.new(key, AES.MODE_CBC, iv)
+layout = cipher.decrypt(base64.b64decode(str_data)).decode("utf-8")
+```
+
+No browser at runtime. Just `requests`. Reverse-engineering that encryption by hand takes hours.
 
 ## How it works
 
@@ -79,7 +112,7 @@ automatiq agent --target path/to/sess  # Builds an automation script from a spec
 ```
 
 ### 3. Resume a previous agent session
-If you quit the agent mid-way (or it hit the step limit), `resume` picks up where you left off — all previous messages, cell outputs, and mode are restored from disk. Snapshots are saved incrementally, so you can resume even after a crash.
+If you quit the agent mid-way (or it hit the step limit), `resume` picks up where you left off. All previous messages, cell outputs, and mode are restored from disk. Snapshots are saved incrementally, so you can resume even after a crash.
 ```bash
 automatiq resume                 # Interactive picker (latest session pre-selected, Enter to resume)
 automatiq resume mysession       # Resume by name (skips picker if unique match)
@@ -108,24 +141,76 @@ automatiq feedback
 
 This sends your message (along with OS/version info) to the telemetry endpoint. No account or GitHub login required.
 
-## Sponsor
+## Sponsors
+
+<sup>Want to Sponsor this Project? Contact me via discord: [@moltensteel](https://discordapp.com/users/772033037788905482)</sup>
+
+<details>
+<summary><b>Our Sponsors</b></summary>
+
+</br>
+
+Maintaining this open-source project sustainably is made possible thanks to our sponsors.
+
+---
 
 <a href="https://go.nodemaven.com/automatiq">
   <img align="right" src="https://raw.githubusercontent.com/StoneSteel27/AutomatiQ/main/assets/nodemaven_banner.png" alt="NodeMaven - High Quality Proxies" width="400">
 </a>
 
-Running web automation and scraping scripts reliably requires high-quality proxies to avoid rate limits, IP bans, and CAPTCHA blocks. [NodeMaven](https://go.nodemaven.com/automatiq) is our recommended provider.
+### [NodeMaven](https://go.nodemaven.com/automatiq) — High Quality Proxy Infrastructure
 
-**Why NodeMaven?**
-- You get **99.9% uptime** with sticky sessions lasting up to 7 days.
-- All proxies have a **fraud score under 97%** while requiring **No KYC** for registration.
-- You can earn up to **10% cashback** on the data you use.
+Running web automation and scraping scripts reliably requires high-quality proxies to avoid rate limits, IP bans, and CAPTCHA blocks.
 
-🎁 **Special codes for AutomatiQ users:**
-- `AUTOMATIQ35` - **35% off** Mobile and Residential Proxies
-- `AUTOMATIQ40` - **40% off** ISP (Static) Proxies
+- **99.9% uptime** with sticky sessions up to 7 days.
+- All proxies have a **fraud score under 97%** — **No KYC** required.
+- Earn up to **10% cashback** on the data you use.
 
-Maintaining this open-source project sustainably is made possible thanks to our sponsor, **NodeMaven**.
+**Special codes for AutomatiQ users:**
+- `AUTOMATIQ35` — **35% off** Mobile and Residential Proxies
+- `AUTOMATIQ40` — **40% off** ISP (Static) Proxies
+
+---
+
+<a href="https://www.swiftproxy.net/?ref=AutomatiQ">
+  <img align="right" src="https://raw.githubusercontent.com/StoneSteel27/AutomatiQ/main/assets/swiftproxy_Banner.png" alt="Swiftproxy - Residential & Static Proxies" width="400">
+</a>
+
+### [Swiftproxy](https://www.swiftproxy.net/?ref=AutomatiQ) — Residential & Static Residential Proxies
+
+Whether you're building browser agents, AI-powered automation workflows, or large-scale data pipelines, Swiftproxy provides the proxy infrastructure to keep your sessions stable and your blocks low.
+
+- **90M+ clean residential IPs** across global locations.
+- **Static residential proxies** for stable sessions, account isolation, and multi-account workflows.
+- **Non-expiring traffic** on dynamic residential proxies — use it whenever you need it.
+- **Free testing** available to evaluate performance before integrating.
+
+**AutomatiQ community offer:**
+- `PROXY90` — **10% off** Residential and Static Residential Proxies
+
+---
+
+<a href="https://www.rapidproxy.io/?ref=AutomatiQ">
+  <img align="right" src="https://raw.githubusercontent.com/StoneSteel27/AutomatiQ/main/assets/Rapidproxy_banner.png" alt="RapidProxy - Residential Proxy Network" width="400">
+</a>
+
+### [RapidProxy](https://www.rapidproxy.io/?ref=AutomatiQ) — High-Performance Residential Proxy Network
+
+Built for developers and teams running web scrapers, browser automation, AI agents, and monitoring tools at scale.
+
+- **90M+ residential IPs** with smart rotation for resilient requests.
+- **High-concurrency support** for workloads at scale.
+- **AI-powered CAPTCHA bypass** to reduce interruptions.
+- **Non-expiring traffic** — use purchased bandwidth whenever you need it.
+
+**AutomatiQ community offer:**
+- **Free trial** available.
+- Pricing starts at **$0.65/GB**.
+- `RAPID10` — **10% off**
+
+</details>
+
+---
 
 ## Models & Custom Endpoints
 
@@ -148,7 +233,7 @@ automatiq run https://example.com \
 
 ## Proxy
 
-Route the recording browser through an HTTP or SOCKS proxy — useful for testing geo-restricted content, avoiding IP bans, or recording through rotating residential proxies.
+Route the recording browser through an HTTP or SOCKS proxy, useful for testing geo-restricted content, avoiding IP bans, or recording through rotating residential proxies.
 
 ```bash
 # One-off: pass a proxy URL for this recording
@@ -168,7 +253,7 @@ server  = "http://user:pass@host:3128"   # or socks5://host:1080
 ```
 
 > [!Tip]
-> Looking for a reliable proxy provider? Our sponsor **[NodeMaven](https://go.nodemaven.com/automatiq)** offers 99.9% uptime residential & ISP proxies — use promo code `AUTOMATIQ35` (35% off Mobile/Residential) or `AUTOMATIQ40` (40% off ISP/Static).
+> Looking for a reliable proxy provider? Our sponsor **[NodeMaven](https://go.nodemaven.com/automatiq)** offers 99.9% uptime residential & ISP proxies. Use promo code `AUTOMATIQ35` (35% off Mobile/Residential) or `AUTOMATIQ40` (40% off ISP/Static).
 
 **Dynamic provider:** The `provider` field is a `"module:callable"` string. At launch, AutomatiQ imports the module and calls the function (no arguments) to get a proxy URL. This lets you plug in rotating proxy services without hardcoding a single IP. The module just needs to be importable (place it in your working directory or on `PYTHONPATH`).
 
@@ -181,7 +266,7 @@ def rotate() -> str:
     return "http://127.0.0.1:3128"
 ```
 
-Precedence: `--no-proxy` > `--proxy URL` > `provider` > `server`. If the provider fails or returns nothing, AutomatiQ falls back to `server`. This only routes the recording browser's egress — LLM API calls, blocklist downloads, and agent tool HTTP are unaffected.
+Precedence: `--no-proxy` > `--proxy URL` > `provider` > `server`. If the provider fails or returns nothing, AutomatiQ falls back to `server`. This only routes the recording browser's egress. LLM API calls, blocklist downloads, and agent tool HTTP are unaffected.
 
 ## Reference
 
@@ -249,6 +334,26 @@ enabled = true
 
 *Priority order: **CLI flag** > `~/.automatiq/config.toml` > built-in defaults.*
 
+## FAQ
+
+**Which sites work best?**
+Sites with little or no bot protection work out of the box. Roughly 60% of sites run no anti-bot protection at all ([DataDome, 2025](https://datadome.co/resources/bot-security-report/)), and a requests-based approach covers the large majority. Heavily protected sites (Cloudflare, DataDome, Akamai) are harder and are the target of roadmap features like the JS VM and surgical browser usage.
+
+**Do I need to understand the site's internals?**
+No. You just perform the task in the browser; AutomatiQ figures out the underlying requests.
+
+**Does it handle logins and single-page apps?**
+Yes. Anything you can do in the browser gets recorded, including authenticated flows and SPA/XHR traffic, and the agent works from that captured network data.
+
+**What if the agent gets stuck or hits the step limit?**
+Run `automatiq resume` to pick up where it left off. Snapshots are saved incrementally, so you can resume even after a crash.
+
+**Is the generated script tied to AutomatiQ?**
+No. The output is a plain, standalone Python script (typically just `requests`). Zero vendor lock-in. You own it and can edit or run it anywhere.
+
+**How much does it cost?**
+AutomatiQ is free and open-source. You only pay for the LLM API calls, or run a local model for free via `--base-url`.
+
 ## Privacy & Telemetry
 
 AutomatiQ collects **anonymous usage-volume telemetry** to help detect crashes, understand feature adoption, and improve the tool. Telemetry is **enabled by default** (opt-out).
@@ -258,14 +363,14 @@ AutomatiQ collects **anonymous usage-volume telemetry** to help detect crashes, 
 - Which command was run (`record`, `agent`, `run`, `resume`, `feedback`)
 - Session duration, step counts, token usage, cell executions
 - Recording metrics (request counts, WebSocket frames, browser used)
-- Error types (exception class and module — **not** full stack traces)
+- Error types (exception class and module, **not** full stack traces)
 - Session outcome (success, abandoned, step-limit-reached, crash)
 
 **What we NEVER collect:**
 - No URLs, domains, or file paths
 - No generated code or IPython cell contents
 - No prompts, LLM responses, or shell output
-- No persistent identifiers — a random `run_id` is generated in memory per run and discarded when the process exits
+- No persistent identifiers. A random `run_id` is generated in memory per run and discarded when the process exits
 - No IP addresses are stored client-side (server-side handling is your responsibility if self-hosting)
 
 **Opting out:**
