@@ -22,7 +22,40 @@
 > [!Note]
 > **Alpha** ⟶ Things will break and change. Read [VISION.md](https://github.com/StoneSteel27/AutomatiQ/blob/main/VISION.md) to understand what AutomatiQ is trying to achieve and where it's headed.
 
-AutomatiQ records HTTP requests, Websocket frames, and your interactions for reverse-engineering your **goal/intent** into a standalone Python automation/extraction script without needing any manual inspection and unnecessary paid dependencies, or heavy dependencies like a browser during runtime.
+**Do the task once in your browser — AutomatiQ writes the script for you.**
+
+Hand-writing scraping and automation scripts is tedious, and reverse-engineering a website's hidden APIs by hand is even worse. AutomatiQ records what the site actually does under the hood — the HTTP requests, WebSocket frames, and your interactions — then an AI agent reverse-engineers it all into a clean, standalone Python script. No manual inspection, no paid dependencies.
+
+**Why not just automate the browser?** Record-and-replay tools that click buttons in a real browser are heavy and brittle — buttons move, pages load slowly, and scripts break. But under the hood, websites are just sending text-based HTTP requests. AutomatiQ targets those requests directly, producing a lightweight [`requests`](https://requests.readthedocs.io/)-based script with **no browser needed at runtime** — hundreds of times faster and ~10× lighter than browser automation.
+
+## Contents
+
+- [What you get](#what-you-get)
+- [How it works](#how-it-works)
+- [Getting Started](#getting-started)
+- [Usage Modes](#usage-modes)
+- [Models & Custom Endpoints](#models--custom-endpoints)
+- [Proxy](#proxy)
+- [Reference](#reference)
+- [FAQ](#faq)
+- [Privacy & Telemetry](#privacy--telemetry)
+- [Development](#development)
+- [Sponsors](#sponsors)
+
+## What you get
+
+A single `automatiq run` session produced this ~460-line CLI tool for [BookMyShow](https://in.bookmyshow.com/) — pick a city, movie, date and showtime, then render the live seat map in your terminal. The agent even reverse-engineered the **AES-CBC encryption** BookMyShow applies to its seat-layout payload, entirely on its own:
+
+```python
+# The seat layout comes back encrypted
+str_data = session.post(seat_layout_url, files=payload).json()["BookMyShow"]["strData"]
+
+# AutomatiQ recovered the AES-CBC scheme and key from the recorded traffic
+cipher = AES.new(key, AES.MODE_CBC, iv)
+layout = cipher.decrypt(base64.b64decode(str_data)).decode("utf-8")
+```
+
+No browser at runtime — just `requests`. This is the kind of reverse-engineering that takes hours to do by hand.
 
 ## How it works
 
@@ -300,6 +333,26 @@ enabled = true
 ```
 
 *Priority order: **CLI flag** > `~/.automatiq/config.toml` > built-in defaults.*
+
+## FAQ
+
+**Which sites work best?**
+Sites with little or no bot protection work out of the box — industry data suggests roughly 60% of sites run no anti-bot protection at all, and a requests-based approach covers the large majority. Heavily protected sites (Cloudflare, DataDome, Akamai) are harder and are the target of roadmap features like the JS VM and surgical browser usage.
+
+**Do I need to understand the site's internals?**
+No. You just perform the task in the browser; AutomatiQ figures out the underlying requests on its own.
+
+**Does it handle logins and single-page apps?**
+Yes. Anything you can do in the browser gets recorded — including authenticated flows and SPA/XHR traffic — and the agent works from that captured network data.
+
+**What if the agent gets stuck or hits the step limit?**
+Run `automatiq resume` to pick up where it left off. Snapshots are saved incrementally, so you can resume even after a crash.
+
+**Is the generated script tied to AutomatiQ?**
+No. The output is a plain, standalone Python script (typically just `requests`). Zero vendor lock-in — you own it and can edit or run it anywhere.
+
+**How much does it cost?**
+AutomatiQ is free and open-source. You only pay for the LLM API calls — or run a local model for free via `--base-url`.
 
 ## Privacy & Telemetry
 
