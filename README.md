@@ -154,11 +154,11 @@ Maintaining this open-source project sustainably is made possible thanks to our 
 
 ---
 
-<a href="https://go.nodemaven.com/automatiq">
+<a href="https://go.nodemaven.com/automatiqRM">
   <img align="right" src="https://raw.githubusercontent.com/StoneSteel27/AutomatiQ/main/assets/nodemaven_banner.png" alt="NodeMaven - High Quality Proxies" width="400">
 </a>
 
-### [NodeMaven](https://go.nodemaven.com/automatiq) — High Quality Proxy Infrastructure
+### [NodeMaven](https://go.nodemaven.com/automatiqRM) — High Quality Proxy Infrastructure
 
 Running web automation and scraping scripts reliably requires high-quality proxies to avoid rate limits, IP bans, and CAPTCHA blocks.
 
@@ -253,7 +253,7 @@ server  = "http://user:pass@host:3128"   # or socks5://host:1080
 ```
 
 > [!Tip]
-> Looking for a reliable proxy provider? Our sponsor **[NodeMaven](https://go.nodemaven.com/automatiq)** offers 99.9% uptime residential & ISP proxies. Use promo code `AUTOMATIQ35` (35% off Mobile/Residential) or `AUTOMATIQ40` (40% off ISP/Static).
+> Looking for a reliable proxy provider? Our sponsors **[NodeMaven](https://go.nodemaven.com/automatiqRM)**, **[Swiftproxy](https://www.swiftproxy.net/?ref=AutomatiQ)** and **[RapidProxy](https://www.rapidproxy.io/?ref=AutomatiQ)** provide special offers for AutomatiQ users, refer [Sponsors](#sponsors) for more information regarding the offers!
 
 **Dynamic provider:** The `provider` field is a `"module:callable"` string. At launch, AutomatiQ imports the module and calls the function (no arguments) to get a proxy URL. This lets you plug in rotating proxy services without hardcoding a single IP. The module just needs to be importable (place it in your working directory or on `PYTHONPATH`).
 
@@ -345,7 +345,7 @@ No. You just perform the task in the browser; AutomatiQ figures out the underlyi
 **Does it handle logins and single-page apps?**
 Yes. Anything you can do in the browser gets recorded, including authenticated flows and SPA/XHR traffic, and the agent works from that captured network data.
 
-**What if the agent gets stuck or hits the step limit?**
+**What if the agent session crashes or accidentally closed?**
 Run `automatiq resume` to pick up where it left off. Snapshots are saved incrementally, so you can resume even after a crash.
 
 **Is the generated script tied to AutomatiQ?**
