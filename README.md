@@ -145,7 +145,7 @@ This sends your message (along with OS/version info) to the telemetry endpoint. 
 
 <sup>Want to Sponsor this Project? Contact me via discord: [@moltensteel](https://discordapp.com/users/772033037788905482)</sup>
 
-<details>
+<details open>
 <summary><b>Our Sponsors</b></summary>
 
 </br>
