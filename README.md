@@ -112,6 +112,11 @@ This sends your message (along with OS/version info) to the telemetry endpoint. 
 
 <sup>Want to Sponsor this Project? Contact me via discord: [@moltensteel](https://discordapp.com/users/772033037788905482)</sup>
 
+<details>
+<summary><b>Our Sponsors</b></summary>
+
+</br>
+
 Maintaining this open-source project sustainably is made possible thanks to our sponsors.
 
 ---
@@ -169,6 +174,10 @@ Built for developers and teams running web scrapers, browser automation, AI agen
 - **Free trial** available.
 - Pricing starts at **$0.65/GB**.
 - `RAPID10` — **10% off**
+
+</details>
+
+---
 
 ## Models & Custom Endpoints
 
