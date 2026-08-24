@@ -12,6 +12,7 @@ Priority chain:  CLI flag  >  ~/.automatiq/config.toml  >  hardcoded default
 
 import json
 import re
+import shutil
 import tomllib
 from pathlib import Path
 
@@ -503,3 +504,15 @@ def ensure_output_dirs():
     ensure_system_dirs()
     for d in (OUTPUT_DIR, WORKSPACE_DIR, BLOCKLIST_DIR):
         d.mkdir(parents=True, exist_ok=True)
+
+
+def reset_output_dirs():
+    """Reset the per-recording output directories to a clean slate.
+
+    A previous failed or aborted recording may have left artifacts in
+    OUTPUT_DIR; a new recording must never inherit them, or its compiled
+    Recording would contain the stale session's files.
+    """
+    if OUTPUT_DIR.exists():
+        shutil.rmtree(OUTPUT_DIR, ignore_errors=True)
+    ensure_output_dirs()

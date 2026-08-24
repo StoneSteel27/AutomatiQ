@@ -416,7 +416,7 @@ def cmd_record(args):
     config.WORKSPACE_DIR = config.OUTPUT_DIR / "workspace"
     config.BLOCKLIST_DIR = config.OUTPUT_DIR / "blocklist"
     config.BLOCKLIST_DB = config.OUTPUT_DIR / "blocklist.db"
-    config.ensure_output_dirs()
+    config.reset_output_dirs()
 
     cancel_token = CancelToken()
     stop_token = StopToken()
@@ -573,7 +573,7 @@ def cmd_run(args):
     config.WORKSPACE_DIR = config.OUTPUT_DIR / "workspace"
     config.BLOCKLIST_DIR = config.OUTPUT_DIR / "blocklist"
     config.BLOCKLIST_DB = config.OUTPUT_DIR / "blocklist.db"
-    config.ensure_output_dirs()
+    config.reset_output_dirs()
 
     cancel_token = CancelToken()
     stop_token = StopToken()

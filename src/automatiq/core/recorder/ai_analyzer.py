@@ -294,7 +294,19 @@ class VideoActionAnalyzer:
 
                     clean_name = re.sub(r"[^\w\-]", "-", raw_text)
                     clean_name = re.sub(r"-+", "-", clean_name).strip("-")
-                    return clean_name[:50] or fallback_name
+                    clean_name = clean_name[:50]
+
+                    # Enforce the blacklist the prompt only requests: a name
+                    # containing a forbidden word (as a whole word) is rejected.
+                    forbidden_words = ("session", "recording", "test", "video", "clip")
+                    if any(re.search(rf"\b{word}\b", clean_name) for word in forbidden_words):
+                        events.log_warn.send(
+                            "recorder",
+                            text=f"AI session name '{clean_name}' used a forbidden word; using fallback.",
+                        )
+                        return fallback_name
+
+                    return clean_name or fallback_name
                 except Exception as e:
                     if self._is_fatal(e):
                         events.log_warn.send(

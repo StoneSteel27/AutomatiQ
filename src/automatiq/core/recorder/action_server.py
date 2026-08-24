@@ -1,13 +1,17 @@
 """Local HTTP server that receives telemetry actions from the recorder extension.
 
-The Chrome extension's content scripts (running in an isolated world) POST user
-actions to ``http://127.0.0.1:<port>/act`` via ``navigator.sendBeacon``. This
+The Chrome extension's content scripts (running in an isolated world) hand user
+actions to the extension's background service worker via
+``chrome.runtime.sendMessage``; the worker relays each payload as a JSON
+``fetch`` POST (with ``keepalive: true``) to ``http://127.0.0.1:<port>/act``.
+The service-worker relay exists because Chromium's Private Network Access
+would otherwise block/prompt requests from HTTPS pages to loopback. This
 server parses each payload, stamps it with timestamps, and hands it to the
 ``BrowserAgent`` for streaming to ``actions.jsonl``.
 
-Using a loopback HTTP endpoint (instead of a CDP ``Runtime.addBinding``) lets the
-recorder avoid enabling the ``Runtime`` / ``Debugger`` CDP domains, which are
-fingerprintable. Loopback is a secure context, so ``sendBeacon`` works even on
+Using a loopback HTTP endpoint (instead of a CDP ``Runtime.addBinding``) lets
+the recorder avoid enabling the ``Runtime`` / ``Debugger`` CDP domains, which
+are fingerprintable. Loopback is a secure context, so the relay works even on
 HTTPS pages, and isolated-world content scripts are not subject to page CSP.
 """
 
