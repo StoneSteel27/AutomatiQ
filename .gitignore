@@ -17,6 +17,7 @@ venv/
 
 # Secrets
 .env
+.env.*
 
 # Downloaded binaries
 bin/
@@ -40,7 +41,8 @@ nul
 # Telemetry server (deployed separately to VPS, not part of client package)
 server/
 
-test_cancel*.py
-test_interrupt*.py
-test_remote*.py
+# Root-level scratch scripts (do NOT match tracked tests under tests/)
+/test_cancel*.py
+/test_interrupt*.py
+/test_remote*.py
 Knowledge.md
