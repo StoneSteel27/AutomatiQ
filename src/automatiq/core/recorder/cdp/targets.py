@@ -190,6 +190,7 @@ class _TargetManager:
 
         # Key by target_id (no session_id available from TargetCreated).
         self.tabs[str(target_id)] = {"tab": tab_session, "type": "page", "url": target_info.url}
+        self._page_target_ids.add(str(target_id))
         events.log_debug.send("recorder", text=f"Successfully bound CDP to new tab: {target_id}")
 
         try:
@@ -218,3 +219,23 @@ class _TargetManager:
         except Exception as exc:
             events.log_error.send("recorder", text=f"Failed to init CDP on new tab {target_id}: {exc}")
             events.log_traceback.send("recorder")
+
+    async def target_destroyed_handler(self, event: cdp.target.TargetDestroyed):
+        """Track page-target destruction so the session can end when the
+        user closes the last browser window.
+
+        ``Target.targetDestroyed`` carries only ``target_id`` (no
+        target_info), so non-page targets are filtered by checking
+        membership in ``self._page_target_ids`` — the set maintained here
+        and by ``run_session`` for the main tab. When the set empties, the
+        browser UI is gone and ``browser_closed_by_user`` is raised for
+        the idle loop in ``browser_agent.run_session``.
+        """
+        tid = str(event.target_id)
+        if tid not in self._page_target_ids:
+            return
+        self._page_target_ids.discard(tid)
+        self.tabs.pop(tid, None)
+        events.log_info.send("recorder", text=f"Tab/Window closed ({len(self._page_target_ids)} remaining)")
+        if not self._page_target_ids:
+            self.browser_closed_by_user = True

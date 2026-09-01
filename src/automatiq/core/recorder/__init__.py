@@ -1,25 +1,21 @@
-"""Recorder sub-package — captures a full browser session (network + video + actions)
-and compiles it into a structured workspace dump for the agent.
-Usage: from automatiq.core.recorder import run_recording; run_recording("https://example.com")
+"""Recorder sub-package — browser-session capture engine.
+
+The capture pipeline (BrowserAgent + ActionServer + CDP handlers + video
+recorder) and the compile pipeline (compile/) live here. Session
+orchestration — lifecycle, threading, state machine, registry — lives in
+``automatiq.mcp.runtime``, which drives ``BrowserAgent.run_session`` and
+``compile_workspace`` directly.
 """
 
-import asyncio
 import importlib
 import logging
-import os
+import shutil
 import sys
-import tempfile
-import time
 import urllib.request
 
-import mss
-
 from .. import config, events
-from ..cancel_standard import CancelToken, StopToken
+from ._guidance import MACOS_PERMISSION_STEPS
 from .blocklist_db import BlocklistDB
-from .browser_agent import BrowserAgent
-from .compile.workspace import compile_workspace
-from .video_recorder import ActionVideoRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -32,10 +28,13 @@ def _check_macos_screen_permission() -> None:
     the full video recording will also produce no output.
 
     The warning is emitted immediately so the user can fix the permission before
-    the recording wastes time.
+    the recording wastes time. ``mss`` is imported lazily so that merely
+    importing this package does not pay for it.
     """
     if sys.platform != "darwin":
         return
+
+    import mss  # noqa: PLC0415 — lazy: heavy-ish import not needed off macOS
 
     try:
         with mss.mss() as sct:
@@ -50,10 +49,7 @@ def _check_macos_screen_permission() -> None:
                     "⚠️  macOS Screen Recording permission is NOT enabled.\n\n"
                     "AutomatiQ needs this to capture video of your browsing session.\n"
                     "To fix:\n"
-                    "  1. Open System Settings > Privacy & Security > "
-                    "Screen & System Audio Recording\n"
-                    "  2. Enable the toggle for your terminal app "
-                    "(Terminal, iTerm2, VS Code, etc.)\n"
+                    f"{MACOS_PERMISSION_STEPS}"
                     "  3. Restart your terminal and try again\n\n"
                     "Proceeding without video — the session will lack visual replay.\n"
                 ),
@@ -65,7 +61,12 @@ def _check_macos_screen_permission() -> None:
 
 
 def _init_blocklist() -> BlocklistDB:
-    """Create (or open) the persistent blocklist DB and download any missing source files."""
+    """Create (or open) the persistent blocklist DB and download any missing source files.
+
+    Runs inside a session worker thread: first-run source downloads can be slow
+    and must never delay the MCP tool call that started the session.
+    """
+    config.ensure_system_dirs()
     db = BlocklistDB(db_path=str(config.BLOCKLIST_DB))
 
     for name, url in config.BLOCKLIST_SOURCES.items():
@@ -74,7 +75,12 @@ def _init_blocklist() -> BlocklistDB:
         if not hosts_file.exists():
             events.log_info.send("recorder", text=f"Downloading blocklist '{name}' ...")
             try:
-                urllib.request.urlretrieve(url, str(hosts_file))
+                # Bounded fetch: urlretrieve has no timeout parameter, so the
+                # equivalent urlopen form caps each source at 10s (failures
+                # stay non-fatal - the source is simply skipped).
+                req = urllib.request.Request(url, headers={"User-Agent": "AutomatiQ/blocklist"})
+                with urllib.request.urlopen(req, timeout=10) as resp, open(hosts_file, "wb") as out:
+                    shutil.copyfileobj(resp, out)
                 events.log_debug.send("recorder", text=f"Saved {hosts_file.name}")
             except Exception as exc:
                 events.log_warn.send("recorder", text=f"Failed to download blocklist '{name}': {exc}")
@@ -85,16 +91,14 @@ def _init_blocklist() -> BlocklistDB:
     return db
 
 
-def _resolve_proxy(proxy: str | None = None, no_proxy: bool = False) -> str | None:
+def _resolve_proxy(proxy: str | None = None) -> str | None:
     """Resolve the browser proxy URL.
 
-    Precedence: explicit --no-proxy > explicit --proxy > dynamic provider > static server.
+    Precedence: explicit tool argument > dynamic provider > static server.
     Returns None when proxying is disabled or resolution fails (recording then
-    proceeds on a direct connection).
+    proceeds on a direct connection). The CLI's --no-proxy flag is gone; the
+    MCP tool passes proxy=None to mean direct.
     """
-    if no_proxy:
-        return None
-
     if proxy:
         return proxy
 
@@ -121,176 +125,3 @@ def _resolve_proxy(proxy: str | None = None, no_proxy: bool = False) -> str | No
         return config.RECORDER_PROXY_SERVER
 
     return config.RECORDER_PROXY_SERVER
-
-
-def run_recording(
-    url: str = "about:blank",
-    session_name: str | None = None,
-    cancel_token: CancelToken = None,
-    stop_token: StopToken = None,
-    skip_callback=None,
-    proxy: str | None = None,
-    no_proxy: bool = False,
-    browser_resolution: tuple[str, object | None, str] | None = None,
-) -> bool:
-    """Run the full recording pipeline: browser -> video -> compile workspace.
-
-    1. Launches Chrome with CDP instrumentation and screen capture.
-    2. User browses freely; Ctrl+C stops the session.
-    3. Compiles the captured data into output/workspace/session_dump/.
-
-    ``browser_resolution`` is optionally produced by the CLI via
-    ``browser_manager.resolve_browser_for_recording`` and forwarded to
-    ``BrowserAgent.run_session`` so that a downloaded Brave or Chrome fallback
-    is used instead of zendriver's default autodetect. When None, the legacy
-    behaviour (``browser=config.BROWSER_TYPE``) is preserved.
-    """
-
-    if not config.WORKSPACE_DIR.exists():
-        config.ensure_output_dirs()
-
-    temp_video_path = os.path.join(tempfile.gettempdir(), "automatiq_full_record.mp4")
-
-    blocklist = _init_blocklist()
-    proxy = _resolve_proxy(proxy=proxy, no_proxy=no_proxy)
-
-    _video_recorder = ActionVideoRecorder(fps=config.FPS, output_path=temp_video_path)
-    _browser_agent = BrowserAgent(blocklist=blocklist, proxy=proxy)
-
-    _check_macos_screen_permission()
-
-    events.log_info.send("recorder", text="[RULE] STARTING RECORDER")
-    events.log_info.send("recorder", text=f"Blocklist  : {blocklist.total_enabled_domains()} domains loaded")
-    events.log_info.send("recorder", text=f"Proxy      : {proxy if proxy else 'direct (no proxy)'}")
-
-    # ── Fire recording_started telemetry ──────────────────────────────────
-    try:
-        from ..telemetry import RecordingStartedProps, client
-
-        _browser_for_telemetry = config.BROWSER_TYPE
-        if browser_resolution:
-            _browser_for_telemetry = browser_resolution[0]
-
-        client.track_recording_started(
-            RecordingStartedProps(
-                browser=str(_browser_for_telemetry),
-                proxy_enabled=proxy is not None,
-                blocklist_enabled=bool(config.BLOCKLIST_SOURCES),
-            )
-        )
-    except Exception:
-        pass
-
-    temp_data_dir = None
-    success = False
-    _record_start = time.monotonic()
-    _recording_error_source: str | None = None
-
-    try:
-        _video_recorder.start()
-
-        # We start the browser agent in the background loop but we need to hold
-        # the main thread to show the spinner. asyncio.run() blocks.
-        from ...cli.console import console
-
-        with console.status(
-            "[green]Recording Active 🔴[/green] Press [blue]Ctrl+C[/blue] to stop and save recording\n",
-            spinner="earth",
-        ):
-            temp_data_dir = asyncio.run(
-                _browser_agent.run_session(
-                    url=url,
-                    stop_token=stop_token,
-                    browser_resolution=browser_resolution,
-                )
-            )
-
-    except KeyboardInterrupt:
-        events.log_warn.send("recorder", text="KeyboardInterrupt caught in run_recording.")
-        if stop_token:
-            stop_token.stop()
-    except Exception as exc:
-        _recording_error_source = "browser_crash"
-        events.log_error.send("recorder", text=f"Recording session failed: {exc}")
-        events.log_traceback.send("recorder")
-    finally:
-        video_start_unix = None
-        try:
-            video_start_unix = _video_recorder.stop()
-        except Exception as exc:
-            _recording_error_source = "video_error"
-            events.log_error.send("recorder", text=f"Failed to stop video recorder: {exc}")
-            events.log_traceback.send("recorder")
-
-        if stop_token:
-            stop_token.reset()
-
-        if cancel_token is None:
-            cancel_token = CancelToken()
-
-        def ask_user_to_skip(remaining: int) -> bool:
-            if skip_callback:
-                return skip_callback(remaining, cancel_token)
-            cancel_token.reset()
-            return True
-
-        blocked = _browser_agent.stats["blocked_by_blocklist"] if _browser_agent else 0
-        if blocked:
-            events.log_info.send("recorder", text=f"Blocklist filtered {blocked} ad/tracker request(s)")
-
-        try:
-            blocklist.close()
-        except Exception as exc:
-            events.log_warn.send("recorder", text=f"Failed to close blocklist DB: {exc}")
-            events.log_traceback.send("recorder")
-
-        if temp_data_dir and video_start_unix:
-            try:
-                final_video_path, success = compile_workspace(
-                    session_name=session_name,
-                    temp_data_dir=temp_data_dir,
-                    full_video_path=temp_video_path,
-                    video_start_unix=video_start_unix,
-                    on_skip_requested=ask_user_to_skip,
-                    cancel_token=cancel_token,
-                    stop_token=stop_token,
-                )
-            except Exception as exc:
-                _recording_error_source = "compilation_error"
-                events.log_error.send("recorder", text=f"Workspace compilation raised unexpectedly: {exc}")
-                events.log_traceback.send("recorder")
-                success = False
-
-            if success and final_video_path:
-                events.log_info.send("recorder", text=f"Full recording saved to {final_video_path}")
-        else:
-            events.log_warn.send("recorder", text="Session data or video timestamp missing. Skipping compilation.")
-
-        # ── Fire anonymous telemetry event ────────────────────────────────
-        try:
-            from ..telemetry import RecordingEndedProps, client
-
-            stats = _browser_agent.stats if _browser_agent else {}
-            browser_used = config.BROWSER_TYPE
-            if browser_resolution:
-                browser_used = browser_resolution[0]
-
-            client.track_recording_ended(
-                RecordingEndedProps(
-                    duration_seconds=round(time.monotonic() - _record_start, 1),
-                    total_http_requests=int(stats.get("total_requests", 0)),
-                    total_ws_connections=int(stats.get("ws_connections", 0)),
-                    total_ws_frames=int(stats.get("ws_frames_sent", 0) + stats.get("ws_frames_received", 0)),
-                    browser_used=str(browser_used),
-                    proxy_enabled=proxy is not None,
-                    has_ai_analysis=success,
-                    crash_reason=(
-                        _recording_error_source
-                        or ("browser_crash" if getattr(_browser_agent, "session_crashed", False) else None)
-                    ),
-                )
-            )
-        except Exception:
-            pass
-
-    return success

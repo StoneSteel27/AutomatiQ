@@ -19,8 +19,28 @@ def merge_and_annotate_actions(
     on_skip_requested: callable = None,
     cancel_token=None,
     stop_token=None,
+    vision_state: dict | None = None,
 ) -> list[dict]:
-    if not actions or not video_start_unix or not os.path.exists(full_video_path):
+    # The runtime's vision state carries the resolved model (from
+    # config.RECORDER_AI_MODEL at session start); the analyzer must call
+    # exactly that model.
+    ai_analyzer = VideoActionAnalyzer(model=(vision_state or {}).get("model"))
+
+    def _sync_vision_state() -> None:
+        """Mirror the analyzer's per-run outcome into the caller's dict."""
+        if vision_state is not None:
+            vision_state["analyzed"] = ai_analyzer.clips_analyzed
+            vision_state["failed"] = ai_analyzer.clips_failed
+            vision_state["fatal_reason"] = ai_analyzer.fatal_reason
+
+    if not actions:
+        # Nothing to annotate: say so, instead of letting the AI phase
+        # silently vanish from the log between compile steps.
+        events.log_info.send("recorder", text="No user actions captured - nothing to annotate with AI.")
+        _sync_vision_state()
+        return actions
+    if not video_start_unix or not os.path.exists(full_video_path):
+        _sync_vision_state()
         return actions
 
     actions.sort(key=lambda x: x.get("timestamp_unix", 0))
@@ -44,7 +64,6 @@ def merge_and_annotate_actions(
         merged_clips.append(current_cluster)
 
     recorder = ActionVideoRecorder(fps=config.FPS)
-    ai_analyzer = VideoActionAnalyzer()
 
     # Import CancelToken standard and cancellable runner from the parent package.
     from ...cancel_standard import CancelRequestedException, run_cancellable
@@ -52,7 +71,7 @@ def merge_and_annotate_actions(
     events.log_info.send("recorder", text=f"Extracting {len(merged_clips)} video action segments for AI...")
     for idx, cluster in enumerate(merged_clips):
         if stop_token and stop_token.is_stopped():
-            events.log_error.send("recorder", text="Compilation completely aborted by user (Ctrl+C).")
+            events.log_error.send("recorder", text="Compilation completely aborted by user (stop requested).")
             raise StopRequestedException("Compilation completely aborted by user.")
 
         if cancel_token and cancel_token.is_cancelled():
@@ -107,4 +126,5 @@ def merge_and_annotate_actions(
                 f"— skipping AI annotation for {len(cluster)} action(s)",
             )
 
+    _sync_vision_state()
     return actions

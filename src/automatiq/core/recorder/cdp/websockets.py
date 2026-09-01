@@ -23,6 +23,15 @@ from .. import events
 logger = logging.getLogger(__name__)
 
 
+def _missed_event_stub(timestamp) -> dict:
+    """Fresh active_websockets stub for a connection whose WebSocketCreated event was missed."""
+    return {
+        "start_time": timestamp,
+        "sequence": 1,
+        "url": "",
+    }
+
+
 class _WebsocketHandlers:
     """WebSocket lifecycle/frame handlers sharing BrowserAgent state via `self`."""
 
@@ -69,11 +78,7 @@ class _WebsocketHandlers:
             # Fallback: if WebSocketCreated was missed (Network.enable not retroactive),
             # create the active_websockets stub here so frames are still captured.
             if rid not in self.active_websockets:
-                self.active_websockets[rid] = {
-                    "start_time": event.timestamp,
-                    "sequence": 1,
-                    "url": "",
-                }
+                self.active_websockets[rid] = _missed_event_stub(event.timestamp)
                 self.stats["ws_connections"] += 1
             else:
                 # Update start_time on the active connection so frame deltas are correct
@@ -102,11 +107,7 @@ class _WebsocketHandlers:
             # Fallback: if both WebSocketCreated and handshake_request were missed,
             # create the active_websockets stub here so frames are still captured.
             if rid not in self.active_websockets:
-                self.active_websockets[rid] = {
-                    "start_time": event.timestamp,
-                    "sequence": 1,
-                    "url": "",
-                }
+                self.active_websockets[rid] = _missed_event_stub(event.timestamp)
                 self.stats["ws_connections"] += 1
 
             record = {

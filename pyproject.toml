@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "automatiq"
 dynamic = ["version"]
-description = "Record browser sessions and reverse-engineer them into automation scripts."
+description = "MCP server that records browser sessions and reverse-engineers them into automation artifacts."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -13,7 +13,7 @@ requires-python = ">=3.11"
 authors = [
     { name = "Kanishq Vijay", email = "stonesteel27@gmail.com" },
 ]
-keywords = ["automation", "data-extraction", "browser-automation", "llm", "agent", "recording", "reverse-engineering"]
+keywords = ["automation", "data-extraction", "browser-automation", "llm", "agent", "recording", "reverse-engineering", "mcp"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -27,21 +27,15 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
+    "fastmcp==3.4.7",
     "litellm~=1.81.13",
     "pydantic~=2.12.5",
-    "python-dotenv~=1.2.1",
-    "pyyaml~=6.0.3",
-    "rich>=13.0.0",
     "zendriver~=0.15.2",
     "mss~=10.1.0",
     "numpy~=2.4.0",
     "imageio-ffmpeg~=0.6.0",
     "requests~=2.32.5",
-    "curl_cffi~=0.14.0",
-    "beautifulsoup4~=4.14.3",
     "magika~=1.0.1",
-    "ipython~=9.10.0",
-    "prompt-toolkit>=3.0.36",
     "blinker>=1.9.0",
     "websockets>=13.0",
 ]
@@ -55,8 +49,6 @@ Issues = "https://github.com/StoneSteel27/AutomatiQ/issues"
 dev = [
     "pre-commit>=3.6.0",
     "ruff>=0.3.0",
-    "build>=1.5.0",
-    "twine>=5.0.0",
     "pytest>=8.0.0",
     "pytest-mock>=3.14.0",
 ]
@@ -72,7 +64,7 @@ where = ["src"]
 include = ["automatiq*"]
 
 [tool.setuptools.package-data]
-"automatiq" = ["cli/data/*.json", "core/recorder/extension/*"]
+"automatiq" = ["core/recorder/extension/*"]
 
 [tool.ruff]
 line-length = 121

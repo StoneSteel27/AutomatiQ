@@ -7,12 +7,18 @@ AutomatiQ is in early alpha. Things are rough and changing fast — contribution
 ```bash
 git clone https://github.com/StoneSteel27/AutomatiQ.git
 cd AutomatiQ
-pip install uv
-uv pip install -e ".[dev]"
+uv sync
 pre-commit install
 ```
 
 See the [README](README.md) for full install and configuration details.
+
+## Repo layout
+
+- `src/automatiq/mcp/` - The MCP server: FastMCP stdio server, runtime, annotation, logging setup, vision, and status log (each module under 700 lines).
+- `src/automatiq/core/` - Recorder engine: config, events, browser and binary managers, telemetry, and the `recorder/` subpackage (`cdp/`, `compile/`, `extension/`).
+- `tests/` - Pytest suite (16 modules, 101 tests).
+- The legacy CLI, LLM investigator agent, IPython sandbox, and telemetry server backend live on the `legacy/v0.3.x` branch, not in `main`.
 
 ## Code style
 
@@ -21,13 +27,17 @@ We use [Ruff](https://docs.astral.sh/ruff/) for linting and formatting. The rule
 If `pre-commit` passes, you're good. To run manually:
 
 ```bash
-ruff check src/ scripts/
-ruff format src/ scripts/
+uv run ruff check src tests
+uv run ruff format src tests
 ```
 
 - Line length: 121
-- Python 3.11+
+- Python 3.11+ (CI matrix: 3.11/3.12/3.13)
 - Double quotes
+
+## Tests
+
+Run the suite with `uv run pytest -q`. Tests follow no-network conventions: fake CDP events feed real handlers, and anything touching the network, a real browser, or a real LLM is monkeypatched (e.g. `automatiq.mcp.runtime.vision_preflight`).
 
 ## Pull requests
 

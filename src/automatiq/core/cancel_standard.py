@@ -1,8 +1,9 @@
 """CancelToken standard — thread-safe cancellation flag for long-running tasks.
 
-This module provides a single, unified cancellation primitive used across
-the agent loop, sandbox execution, and workspace compilation.  It replaces
-all OS-level Esc-key polling that previously read raw bytes from stdin.
+This module provides a single, unified cancellation primitive used by
+workspace compilation. Cancellation is driven by the stop_recording MCP tool
+(via stop tokens) and by on_skip_requested/cancel-token flows - never by
+keyboard input.
 """
 
 import threading

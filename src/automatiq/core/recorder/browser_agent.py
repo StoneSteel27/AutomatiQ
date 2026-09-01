@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 import zendriver as zd
 from zendriver import cdp
 
-from .. import config, events
+from .. import events
 from .action_server import ActionServer
 from .blocklist_db import BlocklistDB
 from .cdp.helpers import TimestampConverter
@@ -123,7 +123,7 @@ BROWSER_LAUNCH_FLAGS: list[str] = [
     "--password-store=basic",  # avoid Gnome Keyring / KDE Wallet
     "--use-mock-keychain",  # avoid macOS Keychain modal (no-op elsewhere)
     "--disable-search-engine-choice-screen",
-    # --- session restore / crash bubbles (former BROWSER_UX_FLAGS) ---
+    # --- session restore / crash bubbles ---
     "--disable-brave-update",
     "--disable-session-crashed-bubble",
     "--hide-crash-restore-bubble",
@@ -136,10 +136,6 @@ BROWSER_LAUNCH_FLAGS: list[str] = [
     f"--disable-features={','.join(_DISABLED_FEATURES)}",
     f"--enable-features={','.join(_ENABLED_FEATURES)}",
 ]
-
-# Kept as a deprecated alias so external import sites (tests, plugins) keep
-# resolving. New code should target BROWSER_LAUNCH_FLAGS.
-BROWSER_UX_FLAGS: list[str] = BROWSER_LAUNCH_FLAGS
 
 
 def platform_launch_policy() -> dict:
@@ -228,6 +224,15 @@ class BrowserAgent(_TargetManager, _NetworkHandlers, _WebsocketHandlers):
         self.crash_timestamp = None
         self.crash_error = None
 
+        # Browser-close detection: snapshot of the chrome Popen plus the set
+        # of live *page* target ids. The idle loop in run_session ends the
+        # session when the process dies (crash/kill, any OS) or the last
+        # page target is destroyed (user closed the final window — also
+        # covers macOS where the Chrome process outlives its windows).
+        self._browser_process = None
+        self._page_target_ids: set[str] = set()
+        self.browser_closed_by_user = False
+
         self.ts_converter = TimestampConverter()
 
         self.active_map = {}
@@ -307,10 +312,9 @@ class BrowserAgent(_TargetManager, _NetworkHandlers, _WebsocketHandlers):
 
         try:
             events.log_info.send("recorder", text="Starting Zendriver Browser...")
-            # Build the zendriver Config. When the CLI passed a resolved
-            # browser (downloaded Brave or Chrome fallback), honour it; else
-            # fall back to the legacy behaviour of letting BROWSER_TYPE drive
-            # zendriver's own autodetect.
+            # Build the zendriver Config. When the caller passed a resolved
+            # browser (a Brave executable path or the system-Brave fallback),
+            # honour it; else let zendriver's Brave autodetect drive the launch.
             zd_kwargs: dict = dict(
                 user_data_dir=self._profile_dir.name,
                 headless=False,
@@ -322,10 +326,10 @@ class BrowserAgent(_TargetManager, _NetworkHandlers, _WebsocketHandlers):
                     zd_kwargs["browser_executable_path"] = str(value)
                     events.log_info.send("recorder", text=f"Using {descriptor}: {value}")
                 else:
-                    zd_kwargs["browser"] = str(value) if value is not None else config.BROWSER_TYPE
+                    zd_kwargs["browser"] = str(value) if value is not None else "brave"
                     events.log_info.send("recorder", text=f"Using {descriptor}")
             else:
-                zd_kwargs["browser"] = config.BROWSER_TYPE
+                zd_kwargs["browser"] = "brave"
             zd_config = zd.Config(**zd_kwargs)
             zd_config.add_extension(ext_dir)
             apply_browser_flags(zd_config, proxy=self.proxy)
@@ -348,6 +352,11 @@ class BrowserAgent(_TargetManager, _NetworkHandlers, _WebsocketHandlers):
             if last_exc is not None:
                 raise last_exc
             self.recording_start = datetime.now(UTC)
+            # Snapshot the browser's Popen handle for liveness polling.
+            # (zendriver nils Browser._process inside stop(), so a direct
+            # later read would race; the snapshot stays poll-able and
+            # poll() on a dead process keeps returning the exit code.)
+            self._browser_process = getattr(self.browser, "_process", None)
 
             # 1. Get the primary tab
             self.tab = await self.browser.get("about:blank")
@@ -355,6 +364,9 @@ class BrowserAgent(_TargetManager, _NetworkHandlers, _WebsocketHandlers):
             # Register it in our central tabs registry
             main_session_id = getattr(self.tab, "session_id", "main")
             self.tabs[main_session_id] = {"tab": self.tab, "type": "page", "url": "about:blank"}
+            # Count the main tab as a live page target (TargetCreated for it
+            # fires during Browser.create, before our handlers are armed).
+            self._page_target_ids.add(str(getattr(self.tab, "target_id", main_session_id)))
 
             events.log_debug.send(
                 "recorder",
@@ -410,11 +422,26 @@ class BrowserAgent(_TargetManager, _NetworkHandlers, _WebsocketHandlers):
             # flatten — the tab's websocket is the ONLY CDP session, so
             # Debugger.Paused events go there and our auto-resume catches them.
             self.browser.connection.add_handler(cdp.target.TargetCreated, self.target_created_handler)
+            self.browser.connection.add_handler(cdp.target.TargetDestroyed, self.target_destroyed_handler)
 
             events.log_info.send("recorder", text=f"Navigating to {url}")
             await self.tab.send(cdp.page.navigate(url=url))
 
-            while not (stop_token and stop_token.is_stopped()):
+            # Idle loop: ends the session on stop request, browser process
+            # death (crash/kill — any OS), or user closing the last window
+            # (TargetDestroyed page-counter, also covers macOS where Chrome
+            # keeps running with zero windows).
+            while True:
+                if stop_token and stop_token.is_stopped():
+                    break
+                proc = self._browser_process
+                if proc is not None and proc.poll() is not None:
+                    self.browser_closed_by_user = True
+                    events.log_info.send("recorder", text="Browser process exited — ending session.")
+                    break
+                if self.browser_closed_by_user:
+                    events.log_info.send("recorder", text="All browser windows closed — ending session.")
+                    break
                 await asyncio.sleep(0.1)
 
         except asyncio.CancelledError:

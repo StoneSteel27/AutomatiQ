@@ -22,6 +22,49 @@ from .serializers import (
 logger = logging.getLogger(__name__)
 
 
+def _detect_body_kind(
+    body_file_path: str,
+    response_detection: dict | None,
+    declared_mime: str,
+    detection_stats: dict,
+    transaction_data: dict,
+    req_root: str,
+) -> dict | None:
+    """Magika content sniffing for one response body (best-effort).
+
+    Returns the (possibly updated) detection dict. On a successful detection
+    this bumps ``detection_stats``, patches the response section of
+    *transaction_data* (content type + mime-mismatch flag) and rewrites
+    transaction.json so the body is copied with the correct extension.
+    Any failure leaves the inputs untouched and only logs a warning.
+    """
+    if response_detection or not MAGIKA_AVAILABLE:
+        return response_detection
+    try:
+        with open(body_file_path, "rb") as bf:
+            chunk = bf.read(1024)
+        if not chunk:
+            return response_detection
+        detection = detect_content_type(chunk)
+        if not detection:
+            return response_detection
+        detection_stats["response_detected"] += 1
+        transaction_data["response"]["content_detection"] = detection
+        detected_mime = detection.get("mime_type", "unknown")
+        if declared_mime != detected_mime and declared_mime != "unknown":
+            detection_stats["mismatches"] += 1
+            transaction_data["response"]["mime_mismatch"] = True
+        with open(os.path.join(req_root, "transaction.json"), "w") as tf:
+            json.dump(make_serializable(transaction_data), tf, indent=2)
+        return detection
+    except Exception as magika_e:
+        events.log_warn.send(
+            "recorder",
+            text=f"Could not detect content type of file {body_file_path}: {magika_e}",
+        )
+        return response_detection
+
+
 def process_network_requests(
     requests_file_path: str, temp_data_dir: str, requests_dir: str, output_dir: str
 ) -> tuple[list[dict], dict, dict]:
@@ -89,7 +132,9 @@ def process_network_requests(
                             "request_sent_unix": item.get("timestamp_unix"),
                             "response_received_unix": item.get("response_timing", {}).get("received_unix"),
                             "loading_finished_unix": item.get("response_timing", {}).get("finished_unix"),
-                            "duration_ms": item.get("response_timing", {}).get("total_duration_ms"),
+                            "duration_ms": item.get("response_timing", {}).get(
+                                "duration_ms", item.get("response_timing", {}).get("total_duration_ms")
+                            ),
                         },
                         "security": {
                             "has_authorization": bool(get_header_val(req_headers, "authorization")),
@@ -125,26 +170,14 @@ def process_network_requests(
                     body_file_path = os.path.join(temp_data_dir, res_data["body_file"])
                     if os.path.exists(body_file_path):
                         # Detect content type FIRST so we use the correct extension when copying
-                        if not response_detection and MAGIKA_AVAILABLE:
-                            try:
-                                with open(body_file_path, "rb") as bf:
-                                    chunk = bf.read(1024)
-                                    if chunk:
-                                        response_detection = detect_content_type(chunk)
-                                        if response_detection:
-                                            detection_stats["response_detected"] += 1
-                                            transaction_data["response"]["content_detection"] = response_detection
-                                            detected_mime = response_detection.get("mime_type", "unknown")
-                                            if declared_mime != detected_mime and declared_mime != "unknown":
-                                                detection_stats["mismatches"] += 1
-                                                transaction_data["response"]["mime_mismatch"] = True
-                                            with open(os.path.join(req_root, "transaction.json"), "w") as tf:
-                                                json.dump(make_serializable(transaction_data), tf, indent=2)
-                            except Exception as magika_e:
-                                events.log_warn.send(
-                                    "recorder",
-                                    text=f"Could not detect content type of file {body_file_path}: {magika_e}",
-                                )
+                        response_detection = _detect_body_kind(
+                            body_file_path,
+                            response_detection,
+                            declared_mime,
+                            detection_stats,
+                            transaction_data,
+                            req_root,
+                        )
 
                         ext = response_detection.get("extension", "bin") if response_detection else "bin"
                         dest_path = os.path.join(req_root, f"res_body.{ext}")

@@ -3,15 +3,13 @@
 </p>
 
 <p align="center">
-  <em>Your <span style="color:#00FFC8;font-weight:bold">activity</span>, into <span style="color:#FF009E;font-weight:bold">automation</span>.</em>
+  <em>Your activity, into automation.</em>
 </p>
 
 <p align="center">
   <a href="https://discord.gg/8j7dFWMMDA"><img src="https://img.shields.io/badge/Discord-Join-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord"></a>
   <img src="https://img.shields.io/badge/Python-3.11+-blue?style=flat-square&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/License-MIT-violet?style=flat-square" alt="License">
-</p>
-<p align="center">
   <a href="https://github.com/StoneSteel27/AutomatiQ/actions/workflows/test.yaml"><img src="https://img.shields.io/github/actions/workflow/status/StoneSteel27/AutomatiQ/test.yaml?branch=main&label=Tests&style=flat-square&logo=github" alt="Test Status"></a>
   <a href="https://github.com/StoneSteel27/AutomatiQ/actions/workflows/lint.yaml"><img src="https://img.shields.io/github/actions/workflow/status/StoneSteel27/AutomatiQ/lint.yaml?branch=main&label=Lint&style=flat-square&logo=python&logoColor=white" alt="Lint Status"></a>
   <img src="https://img.shields.io/pypi/v/automatiq?style=flat-square&color=blue&label=PyPI" alt="PyPI Version">
@@ -20,289 +18,261 @@
 # AutomatiQ
 
 > [!Note]
-> **Alpha** ⟶ Things will break and change. Read [VISION.md](https://github.com/StoneSteel27/AutomatiQ/blob/main/VISION.md) to understand what AutomatiQ is trying to achieve and where it's headed.
+> **Alpha.** Things will break and change. See [VISION.md](VISION.md) for what this project is trying to become.
 
-AutomatiQ records HTTP requests, Websocket frames, and your interactions for reverse-engineering your **goal/intent** into a standalone Python automation/extraction script without needing any manual inspection and unnecessary paid dependencies, or heavy dependencies like a browser during runtime.
+AutomatiQ is a tool that aims to reduce hallucinations and simplify reverse engineering of websites for AI agents. It works by asking you to normally browse your target website, while AutomatiQ records all your interactions and network logs to produce an artifact folder. This artifact folder acts as a source of truth for your AI agent to build web automations, scrapers with higher accuracy, speed and quality without wasting tokens.
+
+The good thing is, Agents will be able to generate direct HTTP-based scripts without ever touching browser during runtime, drastically increasing speed and reducing memory footprint.
+
+> [!Warning]
+> **Sensitive data:** recordings are unredacted - request/response bodies, cookies, and credentials (including typed passwords) are stored verbatim. Treat every session folder as a secret: never commit or share it.
 
 ## How it works
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/StoneSteel27/AutomatiQ/main/assets/process.svg" alt="AutomatiQ" width="800">
-</p>
+1. **Record.** A visible Brave window opens with CDP instrumentation. Capture runs until you close the last window or call `stop_recording`.
+2. **Compile.** Network traffic is decoded into the workspace dump. With a vision model configured, action clips are annotated so the session folder describes what the user actually did.
+3. **Consume.** The session `README.md` documents every artifact. Your MCP client reads it and writes the script.
 
-1. **Record (Browser Capture)** ⟶ Chrome is launched with CDP instrumentation. Every network request, response body, cookie, WebSocket frame, and user interaction (clicks, typing, navigation) is recorded with timestamps. Press `Ctrl+C` when you're done.
-2. **Compile (Vision Analysis)** ⟶ The recording is split into per-action video clips. A vision LLM watches each clip and produces structured annotations (what was clicked, what changed, whether the action succeeded). Network requests are decoded, deduplicated, and structured into a workspace dump.
-3. **Agent (Sandbox Execution)** ⟶ An LLM investigator reads the workspace dump, experiments in an isolated Python/IPython environment, and iteratively produces a working script. It can test hypotheses against the live site with guardrails against loops and repetition.
+## Quickstart
+Paste the following into your agent harness:
+```
+Install AutomatiQ (`pip install automatiq`, Python 3.11+) and register an MCP server in this client:
+name `automatiq`, transport `stdio`, command `automatiq`, args `[]`. After a restart if needed, 5 tools should be live
+```
 
-## Getting Started
+## Install
 
-**Requirements:** Python 3.11+ and [Google Chrome](https://www.google.com/chrome/)
+Python 3.11+. A managed Brave is downloaded on first run if none is found.
 
 ```bash
 pip install automatiq
 ```
 
-Set your API key (AutomatiQ uses Gemini 3.5 Flash by default, but any [litellm-supported provider](https://docs.litellm.ai/docs/providers) works):
+## MCP setup
 
-```bash
-# On Linux/macOS
-export GEMINI_API_KEY=your-key-here
-
-# On Windows (PowerShell)
-$env:GEMINI_API_KEY="your-key-here"
+```json
+{
+  "mcpServers": {
+    "automatiq": {
+      "command": "automatiq"
+    }
+  }
+}
 ```
 
-Run the magic command:
+<details>
+<summary>Codex, OpenCode, and oh-my-pi</summary>
 
-```bash
-automatiq run https://example.com
+Codex (`~/.codex/config.toml`):
+
+```toml
+[mcp_servers.automatiq]
+command = "automatiq"
+args = []
 ```
 
-That's it. Browse the site, press `Ctrl+C`, and the agent takes over.
+OpenCode (`opencode.json`):
 
-## Usage Modes
-
-AutomatiQ offers three ways to operate depending on your workflow:
-
-### 1. All-in-one execution
-The `run` command records a session and immediately launches the agent to write the script.
-```bash
-automatiq run https://example.com
+```json
+{
+  "mcp": {
+    "automatiq": {
+      "type": "local",
+      "command": ["automatiq"]
+    }
+  }
+}
 ```
 
-### 2. Step-by-step execution
-If you want to record multiple sessions, or run the agent later, you can split the process:
-```bash
-automatiq record https://example.com   # Opens the browser and records your session
-automatiq agent                        # Builds an automation script from the last recording
-automatiq agent --target path/to/sess  # Builds an automation script from a specific recording
+oh-my-pi (`mcpServers`):
+
+```json
+{
+  "mcpServers": {
+    "automatiq": {
+      "command": "automatiq"
+    }
+  }
+}
 ```
 
-### 3. Resume a previous agent session
-If you quit the agent mid-way (or it hit the step limit), `resume` picks up where you left off — all previous messages, cell outputs, and mode are restored from disk. Snapshots are saved incrementally, so you can resume even after a crash.
-```bash
-automatiq resume                 # Interactive picker (latest session pre-selected, Enter to resume)
-automatiq resume mysession       # Resume by name (skips picker if unique match)
-```
+</details>
 
-> [!Note]
-> Resume requires the original recording folder to still be in your current directory (the agent reads from both the history snapshot and the recording workspace).
+For debugging, run the stdio server directly: `automatiq` or `python -m automatiq`.
 
-### 4. Sending feedback
-You can send quick inline feedback directly from your terminal:
+## Sponsors
 
-```bash
-automatiq feedback "The agent struggles with shadow DOM selectors"
-```
+<sup>Want to Sponsor this Project? Contact me via discord: [@moltensteel](https://discordapp.com/users/772033037788905482)</sup>
 
-Or omit the message to open the **Interactive Feedback Box** supporting rich multiline input:
+<details open>
+<summary><b>Our Sponsors</b></summary>
 
-```bash
-automatiq feedback
-```
+</br>
 
-* **Controls**:
-  * `Enter` inserts a new line.
-  * `Alt+Enter` (or `Escape` followed by `Enter`) submits your feedback.
-  * *Standard fallback*: If `prompt_toolkit` is not installed, it falls back to a line-by-line input box (press `Ctrl+D` or `Ctrl+Z` on a new line to submit).
+Maintaining this open-source project sustainably is made possible thanks to our sponsors.
 
-This sends your message (along with OS/version info) to the telemetry endpoint. No account or GitHub login required.
+---
 
-## Sponsor
-
-<a href="https://go.nodemaven.com/automatiq">
+<a href="https://go.nodemaven.com/automatiqrmaugust">
   <img align="right" src="https://raw.githubusercontent.com/StoneSteel27/AutomatiQ/main/assets/nodemaven_banner.png" alt="NodeMaven - High Quality Proxies" width="400">
 </a>
 
-Running web automation and scraping scripts reliably requires high-quality proxies to avoid rate limits, IP bans, and CAPTCHA blocks. [NodeMaven](https://go.nodemaven.com/automatiq) is our recommended provider.
+### [NodeMaven](https://go.nodemaven.com/automatiqrmaugust) — High Quality Proxy Infrastructure
 
-**Why NodeMaven?**
-- You get **99.9% uptime** with sticky sessions lasting up to 7 days.
-- All proxies have a **fraud score under 97%** while requiring **No KYC** for registration.
-- You can earn up to **10% cashback** on the data you use.
+Running web automation and scraping scripts reliably requires high-quality proxies to avoid rate limits, IP bans, and CAPTCHA blocks.
 
-🎁 **Special codes for AutomatiQ users:**
-- `AUTOMATIQ35` - **35% off** Mobile and Residential Proxies
-- `AUTOMATIQ40` - **40% off** ISP (Static) Proxies
+- **99.9% uptime** with sticky sessions up to 7 days.
+- All proxies have a **fraud score under 97%** — **No KYC** required.
+- Earn up to **10% cashback** on the data you use.
 
-Maintaining this open-source project sustainably is made possible thanks to our sponsor, **NodeMaven**.
+**Special codes for AutomatiQ users:**
+- `AUTOMATIQ35` — **35% off** Mobile and Residential Proxies
+- `AUTOMATIQ40` — **40% off** ISP (Static) Proxies
 
-## Models & Custom Endpoints
+---
 
-AutomatiQ relies on [LiteLLM](https://github.com/BerriAI/litellm) under the hood, meaning you can easily swap the default Gemini models for OpenAI, Anthropic, GitHub Copilot, or **Local LLMs** (like Ollama, LM Studio, or vLLM).
+<a href="https://www.swiftproxy.net/?ref=AutomatiQ">
+  <img align="right" src="https://raw.githubusercontent.com/StoneSteel27/AutomatiQ/main/assets/swiftproxy_Banner.png" alt="Swiftproxy - Residential & Static Proxies" width="400">
+</a>
 
-To change the default models on the fly, use the `--model` (for the Agent) and `--recorder-model` (for Vision compilation) flags.
+### [Swiftproxy](https://www.swiftproxy.net/?ref=AutomatiQ) — Residential & Static Residential Proxies
 
-### Using Local Models (Ollama, LM Studio, vLLM)
-If you are running a local inference server with an OpenAI-compatible endpoint, use the `--base-url` flag. You must prefix your model name with `openai/` so LiteLLM knows to route it through the OpenAI protocol.
+Whether you're building browser agents, AI-powered automation workflows, or large-scale data pipelines, Swiftproxy provides the proxy infrastructure to keep your sessions stable and your blocks low.
 
-**Example using Ollama (running locally on port 11434):**
-```bash
-automatiq run https://example.com \
-  --model openai/llama3.3 \
-  --recorder-model openai/llava \
-  --base-url http://localhost:11434/v1
-```
+- **90M+ clean residential IPs** across global locations.
+- **Static residential proxies** for stable sessions, account isolation, and multi-account workflows.
+- **Non-expiring traffic** on dynamic residential proxies — use it whenever you need it.
+- **Free testing** available to evaluate performance before integrating.
 
-*For permanent configuration without CLI flags, see [Configuration](#configuration) below.*
+**AutomatiQ community offer:**
+- `PROXY90` — **10% off** Residential and Static Residential Proxies
 
-## Proxy
+---
 
-Route the recording browser through an HTTP or SOCKS proxy — useful for testing geo-restricted content, avoiding IP bans, or recording through rotating residential proxies.
+<a href="https://www.rapidproxy.io/?ref=AutomatiQ">
+  <img align="right" src="https://raw.githubusercontent.com/StoneSteel27/AutomatiQ/main/assets/Rapidproxy_banner.png" alt="RapidProxy - Residential Proxy Network" width="400">
+</a>
 
-```bash
-# One-off: pass a proxy URL for this recording
-automatiq record --proxy socks5://127.0.0.1:1080 https://example.com
+### [RapidProxy](https://www.rapidproxy.io/?ref=AutomatiQ) — High-Performance Residential Proxy Network
 
-# One-off: force a direct connection (overrides config)
-automatiq run --no-proxy https://example.com
-```
+Built for developers and teams running web scrapers, browser automation, AI agents, and monitoring tools at scale.
 
-For permanent configuration, edit `~/.automatiq/config.toml`:
+- **90M+ residential IPs** with smart rotation for resilient requests.
+- **High-concurrency support** for workloads at scale.
+- **AI-powered CAPTCHA bypass** to reduce interruptions.
+- **Non-expiring traffic** — use purchased bandwidth whenever you need it.
 
-```toml
-[recorder_proxy]
-enabled = true
-server  = "http://user:pass@host:3128"   # or socks5://host:1080
-# provider = "myproxies:rotate"          # dynamic "module:callable" for rotating proxies
-```
+**AutomatiQ community offer:**
+- **Free trial** available.
+- Pricing starts at **$0.65/GB**.
+- `RAPID10` — **10% off**
 
-> [!Tip]
-> Looking for a reliable proxy provider? Our sponsor **[NodeMaven](https://go.nodemaven.com/automatiq)** offers 99.9% uptime residential & ISP proxies — use promo code `AUTOMATIQ35` (35% off Mobile/Residential) or `AUTOMATIQ40` (40% off ISP/Static).
+</details>
 
-**Dynamic provider:** The `provider` field is a `"module:callable"` string. At launch, AutomatiQ imports the module and calls the function (no arguments) to get a proxy URL. This lets you plug in rotating proxy services without hardcoding a single IP. The module just needs to be importable (place it in your working directory or on `PYTHONPATH`).
+## Tools
 
-```python
-# myproxies.py — a minimal rotating provider
-import requests
+| Tool | Purpose |
+|---|---|
+| `start_recording(url, session_name?, proxy?, include_video?)` | Opens a visible Brave window. Returns `session_id` immediately. Captures network, WebSockets, actions, and video. |
+| `stop_recording(session_id)` | Requests a graceful end (~1s). Compilation continues. |
+| `wait_for_completion(session_id?, timeout_s?)` | Blocks until a terminal state or timeout. Call in a loop. Sessions also end when the last browser window closes. |
+| `get_status(session_id?)` | One session, or (no id) a newest-first list. |
+| `annotate_user_interactions(session_id?, focus?)` | Re-runs vision analysis. Poll with `wait_for_completion`. |
 
-def rotate() -> str:
-    requests.get("http://127.0.0.1:8000/rotate", timeout=30)
-    return "http://127.0.0.1:3128"
-```
+Workflow: `start_recording` → poll `wait_for_completion` → on completion, read `readme_path` first. Artifacts are plain files under `./automatiq_sessions/<session_name>/` in the MCP server's working directory (add that folder to `.gitignore`).
 
-Precedence: `--no-proxy` > `--proxy URL` > `provider` > `server`. If the provider fails or returns nothing, AutomatiQ falls back to `server`. This only routes the recording browser's egress — LLM API calls, blocklist downloads, and agent tool HTTP are unaffected.
+First run can sit in `initializing` for a minute while Brave downloads. macOS will ask for screen recording permission. Crashed sessions still save the recording plus `crash_report.txt`.
 
-## Reference
+## Vision model
 
-### Keyboard Shortcuts
+AutomatiQ sees requests, WebSocket frames, and raw actions. A vision pass adds what those miss: which on-screen control was used, whether the step succeeded, and a `session_flow` narrative. That is the difference between a HAR-like dump and a session the client can turn into a script with less guessing.
 
-| Phase | Key | Action |
-|:-----:|:---:|:------:|
-| Recording | `Ctrl+C` | Stop recording and save session |
-| Compilation | `Esc` | Skip AI analysis for remaining segments |
-| Compilation | `y` / `n` | Confirm or deny the skip prompt |
-| Agent | `q` | Quit the agent session |
-| Agent | `Esc` | Cancel current LLM call or code execution |
-
-*Note: `Ctrl+C` force-quits the application at any phase.*
-
-### CLI Options
-
-| Flag | Description |
-|------|-------------|
-| `--target PATH` | Path to a specific session folder to run the agent on |
-| `--name NAME` | Custom name for the session folder (`record` and `run` only) |
-| `--model MODEL` | LiteLLM model string for the agent |
-| `--recorder-model MODEL` | Vision model for video-clip analysis |
-| `--base-url URL` | Custom OpenAI-compatible API endpoint |
-| `--max-steps N` | Maximum agent loop iterations (default: 100) |
-| `--sandbox-timeout SEC` | Seconds per IPython cell (default: 60) |
-| `--output-dir PATH` | Root directory for all output (default: ./output) |
-| `--proxy URL` | Route the recording browser through a proxy (`record` and `run` only) |
-| `--no-proxy` | Force a direct connection, overriding config (`record` and `run` only) |
-| `--no-banner` | Skip the startup animation |
-| `--no-telemetry` | Disable anonymous usage telemetry for this run |
-| `--verbose` | Show detailed diagnostic output |
-| `-V`, `--version` | Show version |
-| `-h`, `--help` | Show help message |
-
-### Configuration
-
-On first run, AutomatiQ creates `~/.automatiq/config.toml` with commented defaults. Edit this file to permanently override models, custom endpoints, timeouts, and recording settings.
+Paste a key into `~/.automatiq/config.toml` (created on first run):
 
 ```toml
 [models]
-agent    = "gemini/gemini-3.5-flash"
+recorder_api_key = "your-key-here"
+```
+
+The key must match the provider of `[models] recorder` (any [LiteLLM](https://docs.litellm.ai/docs/providers) provider). Keys are read from this file only, at the start of each recording. `start_recording` reports whether a key was found.
+
+`include_video=true` (default) cuts an MP4 per action cluster for that analysis. Pass `include_video=false` when you want a faster capture and no clips. You can run `annotate_user_interactions` later if you add a key after the recording.
+
+
+## Configuration
+
+Settings live in `~/.automatiq/config.toml`, created with a commented template on first run. Missing keys from new releases are appended in place; the previous file is saved as `config.toml.bak`.
+
+Priority: **tool parameter** > `AUTOMATIQ_*` env var > `~/.automatiq/config.toml` > built-in defaults.
+
+```toml
+[models]
 recorder = "gemini/gemini-3.1-flash-lite"
-# base_url = "http://localhost:11434/v1"   # Uncomment for Ollama / LM Studio / vLLM
-
-[agent]
-max_steps       = 100
-sandbox_timeout = 60
-
-[recording]
-fps                   = 3
-segment_pad           = 2
-merge_gap_threshold   = 1.5
-max_frames_per_prompt = 8
+recorder_api_key = ""
+base_url = ""                    # OpenAI-compatible local endpoint
 
 [recorder_proxy]
-# enabled  = false
-# server   = "http://user:pass@host:3128"
-# provider = "myproxies:rotate"   # dynamic "module:callable" for rotating proxies
+enabled = false
+server  = ""                     # http://user:pass@host:3128 or socks5://host:1080
+# provider = "myproxies:rotate"  # importable "module:callable"
 
 [telemetry]
 enabled = true
-# endpoint = "https://api.automatiq.run/v1/telemetry"   # change only if self-hosting
 ```
 
-*Priority order: **CLI flag** > `~/.automatiq/config.toml` > built-in defaults.*
+Local models: set `base_url` and prefix the model with `openai/` so LiteLLM uses the OpenAI protocol.
 
-## Privacy & Telemetry
-
-AutomatiQ collects **anonymous usage-volume telemetry** to help detect crashes, understand feature adoption, and improve the tool. Telemetry is **enabled by default** (opt-out).
-
-**What we collect:**
-- OS, Python version, AutomatiQ version
-- Which command was run (`record`, `agent`, `run`, `resume`, `feedback`)
-- Session duration, step counts, token usage, cell executions
-- Recording metrics (request counts, WebSocket frames, browser used)
-- Error types (exception class and module — **not** full stack traces)
-- Session outcome (success, abandoned, step-limit-reached, crash)
-
-**What we NEVER collect:**
-- No URLs, domains, or file paths
-- No generated code or IPython cell contents
-- No prompts, LLM responses, or shell output
-- No persistent identifiers — a random `run_id` is generated in memory per run and discarded when the process exits
-- No IP addresses are stored client-side (server-side handling is your responsibility if self-hosting)
-
-**Opting out:**
-
-```bash
-# Per-run: pass the flag
-automatiq --no-telemetry run https://example.com
-
-# Permanent: edit ~/.automatiq/config.toml
-[telemetry]
-enabled = false
+```toml
+[models]
+recorder = "openai/llama3.3"
+base_url = "http://localhost:11434/v1"
 ```
+
+Key edits apply on the next recording. Model changes need a server restart.
+
+Proxy for the recording browser only (LLM calls and blocklist downloads are unchanged):
+
+- one-off: `start_recording(url, proxy="socks5://127.0.0.1:1080")`
+- permanent: `[recorder_proxy]` above
+- rotating: `provider = "module:callable"` that returns a proxy URL; falls back to `server` on failure
+
+Precedence for proxy: tool param > `AUTOMATIQ_RECORDER_PROXY_*` > `provider` > `server`.
+
+<details>
+<summary>Environment variables</summary>
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `AUTOMATIQ_HOME` | `~/.automatiq` | Root for config, browsers, logs, blocklist |
+| `AUTOMATIQ_OUTPUT_DIR` | `./automatiq_sessions` (server cwd) | Session folders |
+| `AUTOMATIQ_RECORDER_MODEL` | `gemini/gemini-3.1-flash-lite` | LiteLLM model string (must support images) |
+| `AUTOMATIQ_API_BASE` | unset | OpenAI-compatible endpoint |
+| `AUTOMATIQ_BROWSER_CHANNEL` | `release` | Brave channel (recorder is Brave-only) |
+| `AUTOMATIQ_BROWSER_EXECUTABLE_PATH` | auto | Explicit browser binary |
+| `AUTOMATIQ_FPS` | `3` | Screen capture frames/sec |
+| `AUTOMATIQ_LOG_LEVEL` | `INFO` | stderr minimum; session log under `~/.automatiq/logs/` is DEBUG+ |
+| `AUTOMATIQ_MERGE_GAP` | `1.5` | Inactivity (s) that splits action clusters |
+| `AUTOMATIQ_SEGMENT_PAD` | `2` | Padding (s) around each action clip |
+| `AUTOMATIQ_MAX_FRAMES_PER_PROMPT` | `8` | Frames sampled per vision prompt |
+| `AUTOMATIQ_TELEMETRY` | `1` | Set `0` to disable |
+| `AUTOMATIQ_BLOCKLIST_SOURCES` | empty | `name1=url1,name2=url2` hosts-file blocklists |
+| `AUTOMATIQ_RECORDER_PROXY_SERVER` | unset | Proxy URL for the recording browser |
+
+</details>
+
+## Telemetry
+
+Anonymous usage telemetry is enabled by default. It reports OS, Python and AutomatiQ versions, which tools ran and how often, durations, error classes, and session outcomes. It never reports URLs, file paths, prompts, or keys. Disable with `[telemetry] enabled = false` or `AUTOMATIQ_TELEMETRY=0`.
 
 ## Development
 
-AutomatiQ is managed using [uv](https://docs.astral.sh/uv/).
-
 ```bash
-# Clone and setup environment
 git clone https://github.com/StoneSteel27/AutomatiQ.git
 cd AutomatiQ
 uv sync
-
-# Run the project from source
-uv run automatiq run https://example.com
-```
-
-### Dev Setup
-Development dependencies (pytest, ruff, pre-commit, etc.) are installed automatically via `uv sync`. This ensures `ruff`, `build`, `twine`, `pytest`, and `pre-commit` hooks (lint + format on every commit) are properly configured in your isolated environment. To set up the git hooks:
-
-```bash
 uv run pre-commit install
-```
-
-Run tests:
-```bash
-uv run pytest
+uv run pytest -q
+uv run automatiq   # MCP stdio server
 ```
 
 ## License

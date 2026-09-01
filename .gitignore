@@ -2,18 +2,28 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
+.eggs/
 dist/
 build/
 
 # Virtual environment
-.venv/
+.venv*/
 venv/
+.python-version
 
 # IDE
 .idea/
 .vscode/
 *.swp
 *.swo
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# uv
+# (uv.lock is committed)
 
 # Secrets
 .env
@@ -24,25 +34,19 @@ bin/
 
 # Output / workspace artifacts
 output/
+recordings/
+automatiq_sessions/
+
+# Root-level scratch folders
+/ai-generated-name*/
 
 # Logs
 *.log
-
-# Ruff cache
-.ruff_cache/
 
 # OS junk
 Thumbs.db
 .DS_Store
 nul
 
-.jailed_bin/
-
 # Telemetry server (deployed separately to VPS, not part of client package)
 server/
-
-# Root-level scratch scripts (do NOT match tracked tests under tests/)
-/test_cancel*.py
-/test_interrupt*.py
-/test_remote*.py
-Knowledge.md

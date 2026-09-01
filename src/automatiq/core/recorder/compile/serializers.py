@@ -4,7 +4,7 @@ import base64
 import logging
 import re
 
-from ... import config, events
+from ... import events
 
 logger = logging.getLogger(__name__)
 
@@ -18,8 +18,6 @@ except ImportError:
     magika_detector = None
     MAGIKA_AVAILABLE = False
     events.log_warn.send("recorder", text="Magika not installed. Skipping advanced content type detection.")
-
-WORKSPACE_DIR = str(config.WORKSPACE_DIR)
 
 
 def sanitize_filename(name: str) -> str:

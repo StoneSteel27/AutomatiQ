@@ -4,17 +4,236 @@ import json
 import logging
 import os
 import shutil
+import threading
+from pathlib import Path
 from urllib.parse import urlparse
 
 from ... import config, events
 from ...cancel_standard import StopRequestedException
-from ..ai_analyzer import VideoActionAnalyzer
 from .actions import merge_and_annotate_actions
 from .network import process_network_requests
 from .serializers import MAGIKA_AVAILABLE, make_serializable, sanitize_filename
 from .websockets import process_websocket_streams
 
 logger = logging.getLogger(__name__)
+
+# Serializes compilations: the pipeline touches shared singletons (Magika
+# detector, ffmpeg binaries) and heavy disk I/O; concurrent sessions must
+# not interleave compile phases.
+_COMPILE_LOCK = threading.Lock()
+
+# Fidelity is the contract: passwords, cookies, auth headers, and API keys
+# are stored verbatim; nothing is ever redacted, so consumers must treat
+# every session folder as a secret. The README template tells MCP clients
+# the same thing.
+_README_TEMPLATE = """\
+# AutomatiQ session dump
+
+Compiled output of one recorded browser session. Everything here is plain
+files. This README is the entry point: it documents every artifact and its
+schema so you can analyze the dump without guessing - start here, then
+follow the pointers.
+
+## Sensitive data
+
+This is a full-fidelity recording: request/response bodies, cookies,
+authorization headers, and anything typed during the session (including
+passwords) are stored verbatim - nothing is redacted. Treat the whole
+folder as a secret: do not commit, share, or paste it anywhere, and
+delete it when you are done.
+
+## How to analyze this dump
+
+1. Read `SUMMARY.json` first - `session_flow` is the chronological
+   narrative of what the user did - then `timeline.json` end-to-end.
+2. Correlate: match `user_action` events to the `network_request` /
+   `websocket_*` events they triggered, via timestamps.
+3. Use the `folder` field on timeline events - it points directly at
+   the transaction directory; don't scan.
+4. Opaque/encrypted payloads: do NOT reverse the cipher by hand.
+   Search the captured JS responses (in `requests/`) for the crypto
+   code (`crypto.subtle`, `CryptoJS`, `AES`, `encrypt`, `decrypt`) and
+   replicate that logic instead.
+5. Never hardcode ephemeral values (tokens, cookies, session IDs) -
+   find the request that mints them and reproduce that flow.
+
+## Using the video (recommended)
+
+The video is the ground truth of what the user actually did; the JSON
+artifacts are the machine's account. Using both greatly increases
+reverse-engineering accuracy and aim.
+
+- `clips/action_clip_NNN.mp4` - one short clip per action cluster; the
+  `ai_video_file` field on a `user_action` event points at its clip.
+  Watch the clip before reproducing an action: it shows the exact
+  element interacted with, the UI state, and whether the action
+  succeeded - disambiguating failed selectors, overlays, and intent.
+- `full_record.mp4` - the whole session; use for flow and context
+  between actions.
+- Agents with vision: prefer reading the clip over trusting selectors
+  alone. Agents without vision: the `ai_*` fields on `user_action`
+  events are distilled from this analysis - use them.
+
+## Vision annotation
+
+{vision_annotation}
+
+When annotation did not run, this same line reports skipped or failed state;
+when it ran, per-clip results live in the `ai_*` fields of `user_action` events.
+
+## Layout
+
+    .
+    |- README.md                 this file
+    |- session_metadata.json     compile status ("completed" when finished)
+    '- workspace/session_dump/
+       |- full_record.mp4        full-screen video of the whole session
+       |- timeline.json          all events merged, sorted by timestamp
+       |- SUMMARY.json           aggregate digest (statistics, session_flow)
+       |- crash_report.txt       only if the browser crashed (still saved)
+       |- clips/                 one short clip per action cluster (video AI)
+       |  '- action_clip_000.mp4
+       |- requests/              one folder per network transaction
+       |  '- 000_GET_example.com/
+       |     |- transaction.json request/response metadata + timing
+       |     |- req_payload.ext  request body (when present)
+       |     '- res_body.ext     response body (when captured)
+       '- websockets/            one folder per websocket connection
+          '- ws_example.com_<request_id>/
+             |- transaction.json handshake metadata
+              |- 00000_client_0ms.txt
+              '- 00001_server_12ms.json
+
+## timeline.json
+
+JSON array sorted by unix `timestamp`. Compact shape:
+`[{timestamp, timestamp_iso, event_type, ...}]`. Elements carry
+`event_type`:
+
+- `user_action` - user input: `action` (click/input/navigate/...),
+  `details` (raw recorder fields), plus AI annotation when video AI
+  ran: `ai_macro_summary`, `ai_elements_interacted`,
+  `ai_action_success`, `ai_video_file` (relative path to the clip),
+  `video_start_sec` / `video_end_sec` (clip bounds in full_record.mp4).
+- `network_request` - one HTTP exchange: `method`, `url`, `status`,
+  `redirected`, `redirected_to_url`; `folder` is relative to
+  session_dump/ and points at `requests/<txn>/`.
+- `websocket_created` / `websocket_closed` - `url`; `folder` points at
+  `websockets/<conn>/`.
+
+## SUMMARY.json
+
+Aggregate digest. Compact shape: `{session, session_flow, statistics}`.
+
+- `session` - recorder metadata: recording start/end, duration,
+  request counts (total/completed/failed/incomplete), `total_actions`,
+  `blocked_by_blocklist`, `body_capture_stats`, `websocket_stats`, and
+  crash fields when the browser crashed.
+- `session_flow` - chronological narrative of what the user did, one
+  `{timestamp_iso, timestamp_unix, summary}` entry per action cluster;
+  present only when video AI annotation ran.
+- `statistics` - `total_requests`, `total_actions`, `methods`,
+  `domains`, `status_codes`, `with_auth`, `with_cookies`,
+  `content_detection` (Magika detection counts, or "Magika not
+  available"), `websockets` (connections/frames/skipped, or null).
+
+## requests/<txn>/transaction.json
+
+Per-exchange metadata. Top-level keys: `metadata`, `request`, `response`.
+
+    {
+      "metadata": {index, unique_id, method, url, status, redirected,
+        redirected_to_url, timing: {request_sent_unix,
+        response_received_unix, loading_finished_unix, duration_ms},
+        security: {has_authorization, has_proxy_authorization,
+        has_challenge}},
+      "request": {headers, cookies_sent, cookies_sent_detailed,
+        content_detection, has_payload},
+      "response": {headers, cookies_set, cookies_set_detailed,
+        content_detection, has_body, mime_mismatch}
+    }
+
+`timing` values are unix timestamps (duration_ms in milliseconds).
+Bodies are stored raw next to it as `req_payload.<ext>`/`res_body.<ext>`;
+the extension reflects the Magika-detected content type (fallback `.bin`).
+
+## websockets/<conn>/
+
+One folder per websocket connection, named `ws_<domain>_<request_id>`.
+`transaction.json` carries the handshake: `url`, `request_headers`,
+`response_headers`, `response_status`, `created_iso`, `closed_iso`.
+
+Frames are one file per frame, named `{seq:05d}_{direction}_{delta_ms}ms{_opcode_suffix}.{ext}`:
+
+- `seq` - zero-padded 5-digit sequence number, per connection.
+- `direction` - `client` (sent by the browser) or `server` (received from the server).
+- `delta_ms` - ms since the previous frame on this connection;
+  accumulate it (anchored at `created_iso`, frame 0) to reconstruct
+  absolute times.
+- opcode suffix - data frames (text/binary) carry none; control frames
+  are tagged `_ping`/`_pong`/`_close`/`_continuation` (unknown:
+  `_opcode<N>`).
+- extension - Magika-sniffed from the payload (e.g. `.json`, `.txt`);
+  fallback is `.txt` for text/close frames, `.bin` otherwise.
+- encoding - text payloads are stored as raw UTF-8; binary payloads
+  are stored as raw bytes (decoded from their wire base64).
+
+## session_metadata.json
+
+    {"status": "completed", "files_verified": <bool>, "original_metadata": {...}}
+
+## Notes
+
+- `CRASH_REPORT_NNN.txt` in session_dump/ marks network-level capture errors
+  for the matching request (NNN = request index).
+- Media and binary payloads are not converted; open them as bytes.
+"""
+
+# Default for the README's {vision_annotation} placeholder: sessions compiled
+# without vision state (callers that do not pass one) report the skipped line.
+# STATE ONLY - _write_readme prefixes it so the rendered line matches the
+# builder's single-prefix format.
+_VISION_LINE_DEFAULT = "skipped (no key - set recorder_api_key in ~/.automatiq/config.toml)"
+
+
+def _vision_readme_line(vision_state: dict) -> str:
+    """One-line vision-annotation state for the session README.
+
+    Mirrors the terminal vision summary in runtime status(): enabled /
+    skipped (no key) / skipped (video disabled) / failed (key rejected) /
+    failed (aborted). The enabled line names the model the analysis used
+    (resolved at session start). Never contains the api_key value.
+    """
+    if not vision_state.get("configured"):
+        if vision_state.get("skip_reason") == "video_disabled":
+            return "AI vision annotation: skipped (video disabled)"
+        return f"AI vision annotation: {_VISION_LINE_DEFAULT}"
+    reason = vision_state.get("fatal_reason")
+    if reason == "auth":
+        return "AI vision annotation: failed (key rejected)"
+    if reason == "other":
+        return "AI vision annotation: failed (aborted - see logs)"
+    analyzed = int(vision_state.get("analyzed", 0))
+    failed = int(vision_state.get("failed", 0))
+    total = analyzed + failed
+    model = vision_state.get("model") or config.RECORDER_AI_MODEL
+    return f"AI vision annotation: enabled (model {model}, {analyzed}/{total} clips)"
+
+
+def _write_readme(output_dir: str, vision_line: str | None = None) -> None:
+    """Write the self-documenting README into the session folder.
+
+    Best-effort: a failure here must never fail the compile. *vision_line*
+    replaces the template's ``{vision_annotation}`` placeholder; when None
+    the skipped default line is written.
+    """
+    try:
+        default_line = f"AI vision annotation: {_VISION_LINE_DEFAULT}"
+        text = _README_TEMPLATE.replace("{vision_annotation}", vision_line or default_line)
+        with open(os.path.join(output_dir, "README.md"), "w", encoding="utf-8") as f:
+            f.write(text)
+    except Exception as e:
+        events.log_warn.send("recorder", text=f"Could not write session README: {e}")
 
 
 def verify_timeline_files(session_dump_dir: str, timeline_events: list[dict]) -> bool:
@@ -45,10 +264,49 @@ def compile_workspace(
     temp_data_dir: str,
     full_video_path: str,
     video_start_unix: float,
+    output_root: str | None = None,
     on_skip_requested: callable = None,
     cancel_token=None,
     stop_token=None,
-) -> tuple[str | None, bool]:
+    vision_state: dict | None = None,
+) -> tuple[str | None, str | None, bool]:
+    """Compile the recorded stream files into a session_dump workspace.
+
+    Creates ``<output_root>/<session_name>/`` (falls back to
+    ``config.OUTPUT_DIR`` when ``output_root`` is None) containing
+    ``workspace/session_dump/`` plus a ``session_metadata.json`` sibling.
+
+    *vision_state* (optional mutable dict) is filled with the AI analyzer's
+    per-run outcome (``analyzed`` / ``failed`` / ``fatal_reason``) and drives
+    the README's vision line; the caller seeds it with ``configured``.
+
+    Returns ``(final_video_path, output_dir, success)``.
+    """
+    with _COMPILE_LOCK:
+        return _compile_workspace_locked(
+            session_name=session_name,
+            temp_data_dir=temp_data_dir,
+            full_video_path=full_video_path,
+            video_start_unix=video_start_unix,
+            output_root=output_root,
+            on_skip_requested=on_skip_requested,
+            cancel_token=cancel_token,
+            stop_token=stop_token,
+            vision_state=vision_state,
+        )
+
+
+def _compile_workspace_locked(
+    session_name: str | None,
+    temp_data_dir: str,
+    full_video_path: str,
+    video_start_unix: float,
+    output_root: str | None = None,
+    on_skip_requested: callable = None,
+    cancel_token=None,
+    stop_token=None,
+    vision_state: dict | None = None,
+) -> tuple[str | None, str | None, bool]:
     events.log_info.send("recorder", text="[RULE] Compiling Workspace")
     events.log_info.send("recorder", text="Extracting data, and analyzing video...")
 
@@ -88,9 +346,21 @@ def compile_workspace(
                 most_common = max(domain_counts, key=domain_counts.get)
                 fallback_session_name = sanitize_filename(most_common)
 
-        # We will do all processing in the current OUTPUT_DIR (the tmp_dir)
-        output_dir = str(config.OUTPUT_DIR)
-        workspace_dir = str(config.WORKSPACE_DIR)
+        # Resolve the per-session output directory: <output_root>/<session_name>.
+        # The name is caller-provided or derived from the most-recorded domain.
+        # The CLI product's LLM session-naming + CWD rename + global config
+        # repointing are intentionally NOT ported: compile stays deterministic,
+        # never writes outside output_root, and never mutates config globals.
+        root = Path(output_root) if output_root else config.OUTPUT_DIR
+        session_dir_name = sanitize_filename(session_name or fallback_session_name)
+        output_dir = str(root / session_dir_name)
+        _base_output_dir = output_dir
+        _idx = 1
+        while os.path.exists(output_dir):
+            output_dir = f"{_base_output_dir}_{_idx:02d}"
+            _idx += 1
+
+        workspace_dir = os.path.join(output_dir, "workspace")
         session_dump_dir = os.path.join(workspace_dir, "session_dump")
         clips_dir = os.path.join(session_dump_dir, "clips")
         requests_dir = os.path.join(session_dump_dir, "requests")
@@ -105,7 +375,14 @@ def compile_workspace(
 
         if actions:
             actions = merge_and_annotate_actions(
-                actions, full_video_path, video_start_unix, clips_dir, on_skip_requested, cancel_token, stop_token
+                actions,
+                full_video_path,
+                video_start_unix,
+                clips_dir,
+                on_skip_requested,
+                cancel_token,
+                stop_token,
+                vision_state=vision_state,
             )
             for action in actions:
                 timeline_events.append(
@@ -211,34 +488,14 @@ def compile_workspace(
             final_meta = {"status": "completed", "files_verified": files_verified, "original_metadata": metadata}
             json.dump(make_serializable(final_meta), f, indent=2)
 
-        # Determine final session name and rename output directory if needed
+        # Self-documenting output: the folder's README is the entry point
+        # for MCP clients reading the dump (structure + file schemas). The
+        # vision line reflects the same state as the runtime status block.
+        _write_readme(output_dir, vision_line=_vision_readme_line(vision_state or {}))
+
+        # Final session directory was decided up front (no post-hoc rename,
+        # no global config repointing — the MCP runtime owns output paths).
         final_output_dir = output_dir
-        if not session_name:
-            analyzer_for_name = VideoActionAnalyzer()
-            ai_session_name = analyzer_for_name.generate_session_name(session_flow, fallback_session_name)
-
-            base_output_dir = os.path.join(os.getcwd(), ai_session_name)
-            final_output_dir = base_output_dir
-            idx = 1
-            while os.path.exists(final_output_dir):
-                final_output_dir = f"{base_output_dir}_{idx:02d}"
-                idx += 1
-
-            shutil.move(output_dir, final_output_dir)
-
-            # Update config globally so everything works smoothly later
-            from pathlib import Path
-
-            # Import the config module dynamically using standard relative import to modify global state
-            from ... import config as global_config
-
-            global_config.OUTPUT_DIR = Path(final_output_dir)
-            global_config.WORKSPACE_DIR = global_config.OUTPUT_DIR / "workspace"
-            global_config.BLOCKLIST_DIR = global_config.OUTPUT_DIR / "blocklist"
-            global_config.BLOCKLIST_DB = global_config.OUTPUT_DIR / "blocklist.db"
-
-            # Update the returned video path to reflect the new directory
-            final_video_path = os.path.join(final_output_dir, "workspace", "session_dump", "full_record.mp4")
 
         # Cleanup temp_data_dir
         try:
@@ -250,40 +507,32 @@ def compile_workspace(
         if metadata.get("session_crashed"):
             crash_timestamp = metadata.get("crash_timestamp", "unknown")
             crash_error = metadata.get("crash_error", "unknown")
-
-            from rich.panel import Panel
-
-            from ....cli.console import console, save_crash_report
-
-            save_crash_report(crash_timestamp=crash_timestamp, crash_error=crash_error)
-
-            console.print(
-                Panel(
-                    f"[bold yellow]A crash occurred during recording at[/bold yellow] [bold]{crash_timestamp}[/bold]\n\n"
-                    "[green]The recording was still saved.[/green] "
-                    "[dim]A few actions and requests may have been lost due to the abrupt termination.[/dim]\n\n"
-                    "[bold red]See automatiq_crash_report.log for details.[/bold red]",
-                    title="[bold red]CRASH DETECTED[/bold red]",
-                    border_style="red",
-                    padding=(1, 2),
-                )
+            try:
+                crash_report = os.path.join(session_dump_dir, "crash_report.txt")
+                with open(crash_report, "w", encoding="utf-8") as f:
+                    f.write(
+                        "AutomatiQ recorder crash report\n"
+                        "===============================\n\n"
+                        f"Timestamp: {crash_timestamp}\n"
+                        f"Error: {crash_error}\n\n"
+                        "The recording was still saved. A few actions and requests\n"
+                        "may have been lost due to the abrupt termination.\n"
+                    )
+            except Exception as e:
+                events.log_warn.send("recorder", text=f"Could not write crash report: {e}")
+            events.log_warn.send(
+                "recorder",
+                text=f"Session crashed at {crash_timestamp}: {crash_error} — recording was still saved.",
             )
 
         events.log_info.send("recorder", text=f"[SUCCESS] Workspace compiled successfully at {final_output_dir}")
 
-        try:
-            from ....cli.console import rename_file_logger
-
-            rename_file_logger(os.path.basename(final_output_dir))
-        except Exception as e:
-            events.log_warn.send("recorder", text=f"Could not rename log file to match session: {e}")
-
-        return final_video_path, True
+        return final_video_path, final_output_dir, True
 
     except StopRequestedException as e:
         events.log_error.send("recorder", text=str(e))
-        return None, False
+        return None, None, False
     except Exception as e:
         events.log_error.send("recorder", text=f"Workspace compilation failed: {e}")
         events.log_traceback.send("recorder")
-        return None, False
+        return None, None, False

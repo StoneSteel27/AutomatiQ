@@ -5,6 +5,29 @@ All notable changes to AutomatiQ are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-09-01
+
+### Changed
+- AutomatiQ is now an MCP-recorder-first server (`automatiq`): a FastMCP stdio server exposing five tools - start_recording, stop_recording, wait_for_completion, get_status, annotate_user_interactions. Install with `pip install automatiq`, run with `python -m automatiq`.
+- Deterministic per-session output directories under `automatiq_sessions/` replace the AI-named CWD output flow; each session folder ships a generated README.md documenting every artifact.
+- The recorder is Brave-only, with a cached-launch freshness gate (7-day re-check) on the managed browser download.
+- Config resolution: `AUTOMATIQ_*` env > `~/.automatiq/config.toml` > defaults. The vision API key is re-read at the start of every recording (no restart needed), and schema migration appends missing config keys with a `.bak` backup.
+- Two-tier logging: DEBUG+ per-session file under `~/.automatiq/logs/`, minimized stderr (stdout stays pure MCP protocol).
+- Python floor lowered to 3.11 (CI matrix 3.11/3.12/3.13).
+- Vision key resolution is config-only: `recorder_api_key` in `~/.automatiq/config.toml` is the single key source; provider env vars are no longer consulted (and are overridden when present).
+
+### Added
+- `annotate_user_interactions` tool: re-runs vision analysis on a recorded session's clips, refreshes timeline annotations, and can answer a focus question with a session-level narrative.
+
+### Fixed
+- Transaction durations: `duration_ms` now falls back to `total_duration_ms` (live transactions no longer report null timing).
+- WebSocket timeline parsing when `created_iso`/`closed_iso` are absent.
+- Browser last-window-close and crash detection via `TargetDestroyed` + process polling.
+- Vision analysis: fatal auth errors are classified and surfaced; retry ladder hardened.
+
+### Removed
+- The CLI (`record`/`run`/`agent`/`resume`/`feedback`), the LLM investigator agent, the IPython sandbox, the telemetry ingestion backend (`server/`), and banner asset scripts - all archived on the `legacy/v0.3.x` branch.
+
 ## [0.3.1] — 2026-07-10
 
 ### Added

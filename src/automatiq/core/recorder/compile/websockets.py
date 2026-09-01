@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+from datetime import datetime
 from urllib.parse import urlparse
 
 from ... import events
@@ -15,6 +16,29 @@ from .serializers import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _new_connection_state(url: str = "", created_iso: str | None = None) -> dict:
+    """Fresh per-connection state dict (never share one between request ids)."""
+    return {
+        "url": url,
+        "request_headers": {},
+        "response_headers": {},
+        "response_status": None,
+        "created_iso": created_iso,
+        "closed_iso": None,
+        "folder_name": None,
+    }
+
+
+def _parse_ts(value) -> float:
+    """ISO-8601 string -> unix timestamp seconds; 0.0 when absent/unparseable."""
+    if not value:
+        return 0.0
+    try:
+        return datetime.fromisoformat(value).timestamp()
+    except Exception:
+        return 0.0
 
 
 # Opcode suffix mapping for WebSocket frame filenames.
@@ -72,40 +96,18 @@ def process_websocket_streams(connections_file: str, frames_file: str, ws_output
                 event_type = record.get("event")
 
                 if event_type == "created":
-                    connections[rid] = {
-                        "url": record.get("url", ""),
-                        "request_headers": {},
-                        "response_headers": {},
-                        "response_status": None,
-                        "created_iso": record.get("created_iso"),
-                        "closed_iso": None,
-                        "folder_name": None,
-                    }
+                    connections[rid] = _new_connection_state(
+                        url=record.get("url", ""), created_iso=record.get("created_iso")
+                    )
                 elif event_type == "handshake_request":
                     if rid not in connections:
-                        connections[rid] = {
-                            "url": "",
-                            "request_headers": {},
-                            "response_headers": {},
-                            "response_status": None,
-                            "created_iso": None,
-                            "closed_iso": None,
-                            "folder_name": None,
-                        }
+                        connections[rid] = _new_connection_state()
                     connections[rid]["request_headers"] = record.get("request_headers", {})
                     if not connections[rid]["created_iso"]:
                         connections[rid]["created_iso"] = record.get("created_iso")
                 elif event_type == "handshake_response":
                     if rid not in connections:
-                        connections[rid] = {
-                            "url": "",
-                            "request_headers": {},
-                            "response_headers": {},
-                            "response_status": None,
-                            "created_iso": None,
-                            "closed_iso": None,
-                            "folder_name": None,
-                        }
+                        connections[rid] = _new_connection_state()
                     connections[rid]["response_headers"] = record.get("response_headers", {})
                     connections[rid]["response_status"] = record.get("response_status")
                     if not connections[rid]["created_iso"]:
@@ -149,15 +151,7 @@ def process_websocket_streams(connections_file: str, frames_file: str, ws_output
             json.dump(make_serializable(transaction_data), f, indent=2)
 
         # Add websocket_created to timeline
-        created_unix = None
-        if conn["created_iso"]:
-            try:
-                from datetime import datetime
-
-                dt = datetime.fromisoformat(conn["created_iso"])
-                created_unix = dt.timestamp()
-            except Exception:
-                pass
+        created_unix = _parse_ts(conn["created_iso"])
 
         timeline_events.append(
             {
@@ -171,14 +165,7 @@ def process_websocket_streams(connections_file: str, frames_file: str, ws_output
 
         # Add websocket_closed to timeline if we have a close event
         if conn["closed_iso"]:
-            closed_unix = None
-            try:
-                from datetime import datetime
-
-                dt = datetime.fromisoformat(conn["closed_iso"])
-                closed_unix = dt.timestamp()
-            except Exception:
-                pass
+            closed_unix = _parse_ts(conn["closed_iso"])
 
             timeline_events.append(
                 {

@@ -22,6 +22,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 from collections.abc import Callable
 from pathlib import Path
@@ -74,6 +75,41 @@ def _version_dir(tag: str) -> Path:
     return _brave_cache_root() / tag
 
 
+# Freshness gate for cached launches: re-validate the cached copy against the
+# versions JSON at most once every 7 days, with a short timeout so a flaky
+# network can only ever cost seconds on the launch path.
+_VERSION_CHECK_INTERVAL = 7 * 86400
+_VERSION_CHECK_TIMEOUT = 5.0
+
+
+def _last_check_path() -> Path:
+    """Marker file holding the unix timestamp of the last freshness check."""
+    return _brave_cache_root() / ".last-version-check"
+
+
+def _version_check_due() -> bool:
+    """True when the cached copy's freshness must be re-checked.
+
+    Due when the marker file is missing, unparseable, or older than
+    ``_VERSION_CHECK_INTERVAL`` seconds.
+    """
+    try:
+        last = float(_last_check_path().read_text(encoding="utf-8").strip())
+    except Exception:
+        return True
+    return (time.time() - last) >= _VERSION_CHECK_INTERVAL
+
+
+def _touch_version_check() -> None:
+    """Record that a freshness check just completed successfully (best-effort)."""
+    try:
+        path = _last_check_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(time.time()), encoding="utf-8")
+    except Exception as exc:
+        logger.debug(f"Could not record the Brave version-check timestamp ({exc}).")
+
+
 def _strip_sha256(text: str) -> str:
     """Parse a Brave ``.sha256`` file. Format: ``<hexdigest>  <filename>``."""
     # Some Brave sha files put just the digest on the first line; others use
@@ -81,7 +117,7 @@ def _strip_sha256(text: str) -> str:
     return text.strip().split()[0].strip().lower()
 
 
-def _fetch_versions() -> list[dict]:
+def _fetch_versions(timeout: float = 30.0) -> list[dict]:
     """Fetch the Brave versions JSON and return a list of version entries.
 
     Each entry is the raw dict from ``brave-versions.json`` (keys: ``tag``,
@@ -91,7 +127,7 @@ def _fetch_versions() -> list[dict]:
     import urllib.request
 
     req = urllib.request.Request(_VERSIONS_URL, headers={"User-Agent": "AutomatiQ/browser-manager"})
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         raw = resp.read().decode("utf-8")
     data = json.loads(raw)
     # The JSON is a top-level mapping { "<tag>": { ...version... }, ... }.
@@ -280,7 +316,7 @@ def _remove_macos_quarantine(exe_path: Path) -> None:
     except FileNotFoundError:
         logger.debug("xattr not found — skipping quarantine removal (not macOS?)")
     except Exception:
-        logger.debug("Unexpected error during quarantine removal — continuing anyway.")
+        logger.debug("Unexpected error during quarantine removal — continuing anyway.", exc_info=True)
 
 
 def _verify_macos_signature(app_bundle: Path) -> bool:
@@ -400,8 +436,11 @@ def ensure_brave(
     """Ensure a usable Brave executable is available; download one if needed.
 
     Steps:
-      1. If a cached copy of the *latest* version for *channel* exists and
-         *force* is False, return it.
+      1. If a cached copy exists and *force* is False, return it immediately
+         with ZERO network when its freshness was checked recently (marker
+         file under the cache root); otherwise re-validate against the
+         versions JSON at most every 7 days with a short (5s) timeout - on
+         any check failure, log and return the cached copy anyway.
       2. Fetch the Brave versions JSON, resolve the latest version for *channel*.
       3. Download the platform-matching zip + its ``.sha256`` to a staging dir.
       4. Verify the checksum. On mismatch, raise ``RuntimeError``.
@@ -410,6 +449,10 @@ def ensure_brave(
          the bit already on Linux/macOS).
       7. Write a tiny ``.automatiq-manifest.json`` next to it.
       8. Delete the staging zip + checksum and return the executable path.
+
+    Cached launches are network-free whenever the freshness marker is fresh;
+    failures of the freshness probe fall back to the cache. The download path
+    (no usable cache, tag mismatch, or *force*) is unchanged.
 
     Raises ``RuntimeError`` with a user-friendly message on network failure,
     unsupported platform, or checksum mismatch.
@@ -422,11 +465,17 @@ def ensure_brave(
     if not force:
         cached = find_brave_executable(channel=channel)
         if cached is not None:
-            # If we have a cached version, check whether it's the latest for
-            # this channel. We only do a network lookup here when we have a
-            # cached copy; on failure, log and return the cached one.
+            # Cached launch: network-free most of the time. Freshness is
+            # re-validated at most every 7 days with a short timeout; any
+            # probe failure falls back to the cache (the marker file is only
+            # touched on success, so a down network costs at most one
+            # bounded probe per launch).
+            if not _version_check_due():
+                return cached
+            # Otherwise check whether the cached copy is the latest for this
+            # channel. On failure, log and return the cached one.
             try:
-                versions = _fetch_versions()
+                versions = _fetch_versions(timeout=_VERSION_CHECK_TIMEOUT)
                 latest = _latest_for_channel(versions, channel)
                 latest_tag = latest.get("tag")
                 if latest_tag:
@@ -436,9 +485,14 @@ def ensure_brave(
                     if manifest_path.exists():
                         try:
                             cached_tag = json.loads(manifest_path.read_text(encoding="utf-8")).get("tag")
-                        except Exception:
+                        except Exception as exc:
                             cached_tag = None
+                            logger.warning(
+                                f"Could not read the manifest at {manifest_path} ({exc}) - the cached copy "
+                                "will be re-verified and re-downloaded if it does not match the latest release."
+                            )
                         if cached_tag == latest_tag:
+                            _touch_version_check()
                             return cached
                     # No manifest or stale → fall through and re-download.
             except Exception as exc:
@@ -463,6 +517,7 @@ def ensure_brave(
     exe_path = version_dir / exe_rel
     if exe_path.exists() and not force:
         _write_manifest(version_dir, latest)
+        _touch_version_check()
         return exe_path
 
     # Stage the download under a hidden subdir so we can clean up atomically.
@@ -524,6 +579,7 @@ def ensure_brave(
                 )
 
         _write_manifest(version_dir, latest)
+        _touch_version_check()
         return exe_path
     finally:
         # Clean up staging (keep around only on success for debugging).
@@ -568,58 +624,46 @@ def resolve_browser_for_recording(
     prompt_callback: Callable[[str], bool] | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> tuple[str, Path | None, str]:
-    """Decide how to launch the recording browser.
+    """Decide how to launch the recording browser (Brave-only).
 
     Returns a ``(verb, path_or_none, descriptor)`` tuple suitable for passing
     into ``zendriver.Config``:
 
       - ``("browser_executable_path", <Path>, "Brave <tag>")`` — launch the
         managed-path browser at *path*.
-      - ``("browser", "chrome", "Chrome")`` — fall back to zendriver's Chrome
-        autodetect.
       - ``("browser", "brave", "Brave (system)")`` — fall back to installed
-        Brave via zendriver's Brave autodetect. (Used only when
-        ``config.BROWSER_TYPE=="brave"`` but no managed copy is available and
-        the user explicitly wants Brave via PATH — currently unreachable, since
-        ``find_brave_executable`` already covers PATH.)
+        Brave via zendriver's Brave autodetect. (Defensive fallback kept
+        deliberately: ``find_brave_executable`` already covers PATH, but this
+        branch guarantees a launchable answer even if that ever changes.)
 
     Args:
         no_auto_download: when True, never prompt or download; fall straight
-            through to whatever system browser is available.
+            through to the system-Brave fallback.
         prompt_callback: invoked with a ``question`` string when a download is
             being proposed; its return value is truthy to proceed, falsy to
-            skip. When None, the download proceeds without prompting (used by
-            the ``setup`` command).
-        progress_callback: forwarded to :func:`ensure_brave` for Rich progress.
+            skip. When None, the download proceeds without prompting.
+        progress_callback: forwarded to :func:`ensure_brave`.
     """
     if config.BROWSER_EXECUTABLE_PATH:
         path = Path(config.BROWSER_EXECUTABLE_PATH)
         if path.exists():
             return "browser_executable_path", path, f"browser at {path}"
 
-    if config.BROWSER_TYPE not in ("brave", "auto", "chrome"):
-        # Unrecognised type — let zendriver pick Chrome.
-        return "browser", "chrome", "Chrome (default)"
-
-    if config.BROWSER_TYPE == "chrome":
-        return "browser", "chrome", "Chrome"
-
-    # auto / brave → prefer Brave.
     found = find_brave_executable(channel=config.BROWSER_CHANNEL)
     if found is not None:
         return "browser_executable_path", found, "Brave"
 
     if no_auto_download:
-        # Fall through to installed Chrome via zendriver's autodetect.
-        return "browser", "chrome", "Chrome (Brave not configured)"
+        # Fall through to installed Brave via zendriver's autodetect.
+        return "browser", "brave", "Brave (system)"
 
     # Offer to download.
     question = (
         "Brave not found. Brave ships built-in anti-fingerprinting and "
         "anti-tracking protections that help keep the recorder stealthy "
-        "against websites — fewer detection signals than a default Chrome "
-        "profile, making it less likely your automation is noticed by anti-bot "
-        "defenses.\n\nDownload a portable Brave copy now? (~300 MB) [Y/n] "
+        "against websites — fewer detection signals, making it less likely "
+        "your automation is noticed by anti-bot defenses.\n\n"
+        "Download a portable Brave copy now? (~300 MB) [Y/n] "
     )
     if prompt_callback is not None:
         try:
@@ -630,7 +674,7 @@ def resolve_browser_for_recording(
         should_download = True
 
     if not should_download:
-        return "browser", "chrome", "Chrome (Brave download skipped)"
+        return "browser", "brave", "Brave (system)"
 
     brave_path = ensure_brave(channel=config.BROWSER_CHANNEL, progress_callback=progress_callback)
     return "browser_executable_path", brave_path, "Brave"

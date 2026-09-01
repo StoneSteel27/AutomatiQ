@@ -10,6 +10,7 @@ import mss
 import numpy as np
 
 from .. import events
+from ._guidance import MACOS_PERMISSION_STEPS
 
 logger = logging.getLogger(__name__)
 
@@ -91,8 +92,7 @@ class ActionVideoRecorder:
                     "recorder",
                     text="Screen recording permission denied — AutomatiQ needs access to capture video.\n\n"
                     "To fix this:\n"
-                    "  1. Open System Settings > Privacy & Security > Screen & System Audio Recording\n"
-                    "  2. Enable the toggle for your terminal app (Terminal, iTerm2, VS Code, etc.)\n"
+                    f"{MACOS_PERMISSION_STEPS}"
                     "  3. Restart your terminal and run AutomatiQ again\n\n"
                     "If the toggle is already enabled, try toggling it off and back on — macOS "
                     "sometimes caches a stale permission grant.",
