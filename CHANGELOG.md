@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.4.0] - 2026-09-01
 
 ### Changed
-- AutomatiQ is now an MCP-recorder-first server (`automatiq`): a FastMCP stdio server exposing five tools - start_recording, stop_recording, wait_for_completion, get_status, annotate_user_interactions. Install with `pip install automatiq`, run with `python -m automatiq`.
+- AutomatiQ is now an MCP-recorder-first server (`automatiq`): a FastMCP stdio server exposing five tools - start_recording, stop_recording, wait_for_completion, get_status, annotate_user_interactions. Install with `pip install automatiq`, run with the `automatiq` command or `python -m automatiq`.
 - Deterministic per-session output directories under `automatiq_sessions/` replace the AI-named CWD output flow; each session folder ships a generated README.md documenting every artifact.
 - The recorder is Brave-only, with a cached-launch freshness gate (7-day re-check) on the managed browser download.
 - Config resolution: `AUTOMATIQ_*` env > `~/.automatiq/config.toml` > defaults. The vision API key is re-read at the start of every recording (no restart needed), and schema migration appends missing config keys with a `.bak` backup.
@@ -18,15 +18,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - `annotate_user_interactions` tool: re-runs vision analysis on a recorded session's clips, refreshes timeline annotations, and can answer a focus question with a session-level narrative.
+- Telemetry v2: `server_started` (one per process: model + config booleans), `tool_called` (every MCP tool invocation with duration, outcome, and error class, captured via FastMCP middleware), and `annotate_run` (vision re-analysis job completion) alongside the recorder lifecycle events.
+- Sponsors section (NodeMaven, Swiftproxy, RapidProxy) in README and AGENTS.md.
+- README Quickstart: a paste-into-your-agent install block.
 
 ### Fixed
+- Telemetry events were never sent: the client worker is now started at server startup.
 - Transaction durations: `duration_ms` now falls back to `total_duration_ms` (live transactions no longer report null timing).
 - WebSocket timeline parsing when `created_iso`/`closed_iso` are absent.
 - Browser last-window-close and crash detection via `TargetDestroyed` + process polling.
 - Vision analysis: fatal auth errors are classified and surfaced; retry ladder hardened.
 
 ### Removed
-- The CLI (`record`/`run`/`agent`/`resume`/`feedback`), the LLM investigator agent, the IPython sandbox, the telemetry ingestion backend (`server/`), and banner asset scripts - all archived on the `legacy/v0.3.x` branch.
+- The CLI (`record`/`run`/`agent`/`resume`/`feedback`), the LLM investigator agent, the IPython sandbox, and banner asset scripts - all archived on the `legacy/v0.3.x` branch. The telemetry ingestion backend is no longer part of the repo (deployed separately; slimmed to a recorder-only event model).
 
 ## [0.3.1] — 2026-07-10
 
