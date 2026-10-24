@@ -49,11 +49,11 @@ Maintaining this open-source project sustainably is made possible thanks to our 
 
 ---
 
-<a href="https://go.nodemaven.com/automatiqamdaugust">
+<a href="https://go.nodemaven.com/automatiqagentsseptember">
   <img align="right" src="https://raw.githubusercontent.com/StoneSteel27/AutomatiQ/main/assets/nodemaven_banner.png" alt="NodeMaven - High Quality Proxies" width="400">
 </a>
 
-### [NodeMaven](https://go.nodemaven.com/automatiqamdaugust) — High Quality Proxy Infrastructure
+### [NodeMaven](https://go.nodemaven.com/automatiqagentsseptember) — High Quality Proxy Infrastructure
 
 Running web automation and scraping scripts reliably requires high-quality proxies to avoid rate limits, IP bans, and CAPTCHA blocks.
 
